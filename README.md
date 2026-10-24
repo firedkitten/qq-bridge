@@ -10,7 +10,7 @@
 >
 > 🍴 本仓库是 **[Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge)** 的 fork，衍生改动的完整清单（人格记忆与会话隔离、云端部署套件、管理面板等）见 **[NOTICE.md](NOTICE.md)** 与 **[CHANGELOG.md](CHANGELOG.md)**。
 >
-> 📦 本 fork 的版本号自 **`v0.1.0`** 起另行计算（功能基线为上游 `v0.2.1-r1`，下面的适配说明仍针对该基线）。
+> 📦 本 fork 的版本号自 **`v0.1.0`** 起另行计算，当前 **`v0.1.1`**（功能基线为上游 `v0.2.1-r1`，下面的适配说明仍针对该基线）。
 
 把 QQ 消息接入 DSH agent：QQ 好友/群发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ。
 

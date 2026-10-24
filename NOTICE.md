@@ -19,8 +19,6 @@
 | SnowLuma 运行时（`SnowLuma-v2.1.1-win-x64/`） | 体积 100 MB+、内含第三方二进制；且 SnowLuma EULA §5.4 禁止随第三方分发 |
 | `config.json`、`state/`、`roles/*.md` 的个人内容 | 含QQ 号、令牌、聊天数据 |
 | `deploy/panel/panel.config.json`、`deploy/*.cmd`、`*.pem` | 含服务器 IP、私钥路径、控制台令牌 |
-| `deploy/README.md`、`deploy/nginx-hexo.conf`、`docs/本机部署与运维笔记.md`、`docs/云端部署选型与厂商对比.md` | 记录的是机器和服务器的具体环境（路径、端口、备案细节），不入库 |
-| 部署留痕 / 会话总结类文档 | 内含明文凭据 |
 
 本仓库内的脚本一律使用占位符（`<服务器公网IP>`、`<控制台访问令牌>`、`<机器人QQ>` 等），填自己的值即可。
 
@@ -53,7 +51,7 @@
 | `deploy/04-dsh-plugins.sh` | 把本仓库 `plugins/` 挂进 DSH profile，并**挂载三个 MCP server**（漏这一步会导致所有 `qq_*` 工具不存在） |
 | `deploy/06-export.sh` / `deploy/07-import-local.ps1` | 把服务器上的状态打包回本地 |
 | `deploy/dsh-web.service`、`deploy/qq-bridge.service` | 两个 systemd 单元 |
-| `deploy/config.linux.json` | Linux 版配置模板（已去 Windows 专属字段） |
+| `deploy/config.linux.json` | Linux 版配置模板 |
 | `deploy/tunnel.ps1` | 本地开 SSH 隧道（服务器/私钥/用户名走参数或环境变量，不写死） |
 | `deploy/panel/` | 本地管理面板：先起 SSH 隧道，再用浏览器看服务状态、日志、三个入口（控制台 / SnowLuma WebUI / noVNC） |
 
