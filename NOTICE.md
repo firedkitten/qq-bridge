@@ -12,14 +12,14 @@
 
 ## 2. 不随本仓库分发的内容
 
-以下内容**有意未纳入版本控制**（见 `.gitignore`），因此克隆本仓库后不能直接跑起来，需自行准备（`deploy/` 下的脚本只有通用部分入库）：
+以下内容**有意未纳入版本控制**，因此克隆本仓库后不能直接跑起来，需自行准备（`deploy/` 下的脚本只有通用部分入库）：
 
 | 内容 | 原因 |
 |---|---|
 | SnowLuma 运行时（`SnowLuma-v2.1.1-win-x64/`） | 体积 100 MB+、内含第三方二进制；且 SnowLuma EULA §5.4 禁止随第三方分发 |
-| `config.json`、`state/`、`roles/*.md` 的个人内容 | 含真实 QQ 号、令牌、聊天数据 |
+| `config.json`、`state/`、`roles/*.md` 的个人内容 | 含QQ 号、令牌、聊天数据 |
 | `deploy/panel/panel.config.json`、`deploy/*.cmd`、`*.pem` | 含服务器 IP、私钥路径、控制台令牌 |
-| `deploy/README.md`、`deploy/nginx-hexo.conf`、`docs/本机部署与运维笔记.md` | 记录的是我这台机器和这台服务器的具体环境（路径、端口、备案细节），本地留存、不入库 |
+| `deploy/README.md`、`deploy/nginx-hexo.conf`、`docs/本机部署与运维笔记.md`、`docs/云端部署选型与厂商对比.md` | 记录的是机器和服务器的具体环境（路径、端口、备案细节），不入库 |
 | 部署留痕 / 会话总结类文档 | 内含明文凭据 |
 
 本仓库内的脚本一律使用占位符（`<服务器公网IP>`、`<控制台访问令牌>`、`<机器人QQ>` 等），填自己的值即可。
@@ -53,7 +53,6 @@
 | `deploy/04-dsh-plugins.sh` | 把本仓库 `plugins/` 挂进 DSH profile，并**挂载三个 MCP server**（漏这一步会导致所有 `qq_*` 工具不存在） |
 | `deploy/06-export.sh` / `deploy/07-import-local.ps1` | 把服务器上的状态打包回本地 |
 | `deploy/dsh-web.service`、`deploy/qq-bridge.service` | 两个 systemd 单元 |
-| `deploy/nginx-hexo.conf` | 同机跑 Hexo 博客时的 nginx 站点（**本机专用，已在 `.gitignore` 中，不随仓库分发**） |
 | `deploy/config.linux.json` | Linux 版配置模板（已去 Windows 专属字段） |
 | `deploy/tunnel.ps1` | 本地开 SSH 隧道（服务器/私钥/用户名走参数或环境变量，不写死） |
 | `deploy/panel/` | 本地管理面板：先起 SSH 隧道，再用浏览器看服务状态、日志、三个入口（控制台 / SnowLuma WebUI / noVNC） |
@@ -62,10 +61,9 @@
 
 - `public/console.html` + `src/bridge.js`：新增「重启 DSH」按钮与 `POST /api/dsh/restart`（systemd 单元可通过 `QQ_BRIDGE_DSH_UNIT` 覆盖）。
 - `.gitattributes`：固定 `*.sh` / `*.service` / `*.conf` 为 LF（否则在 Windows 上检出成 CRLF，scp 到 Linux 后 `bash` 直接报 `bad interpreter`）。
-- 文档：`docs/云端部署选型与厂商对比.md` 为新增的部署笔记（已脱敏）；`docs/本机部署与运维笔记.md` 记录的是本机环境细节，已移出仓库（`.gitignore` 忽略）。
 
 ## 4. 安全与合规
 
 - SnowLuma 的使用须遵守其 EULA；`deploy/02-snowluma.sh` 默认拒绝执行，需显式加 `--i-have-read-eula` 确认。
 - 桥接默认只监听 `127.0.0.1`，对外只开 SSH，其余端口一律走隧道。
-- 提交前请跑 `npm run privacy-scan`，把自己的真实标识写进 `scripts/privacy-rules.json`（该文件不入库）。
+- 提交前请跑 `npm run privacy-scan`，把自己的真实标识写进 `scripts/privacy-rules.json`。

@@ -113,3 +113,4 @@ _import-backup-*
 /deploy/nginx-hexo.conf
 /deploy/README.md
 /docs/本机部署与运维笔记.md
+/docs/云端部署选型与厂商对比.md
