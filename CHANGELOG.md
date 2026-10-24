@@ -1,0 +1,68 @@
+# 更新日志
+
+本文件记录本 fork 的发布版本。版本号自本 fork 起算，与上游 `Derpyu520/qq-bridge` 的编号各自独立；
+功能基线见每条版本下的「上游基线」说明。
+
+---
+
+## v0.1.0 — 2026-10-24
+
+本 fork 的首个发布版本。上游基线 `v0.2.1-r1`（适配 DeepSeek Harness `0.2.1-rc.2`）。
+
+### 新增功能
+
+**人格记忆与会话隔离（C2）**
+
+- 切人格不再只是换一段提示词：三类轻量记忆（进行中的话题 / 想说未说的话 / 群友印象）与会话池
+  （会话映射 + 会话令牌）都按人格分别存档在 `state/persona-memory/`、`state/persona-sessions/`。
+- 切人格是「换轨」不是「清空」：各自人格的对话留在各自名下，**切回来接回原对话继续聊**；
+  不属于当前人格的会话全部脱钩（退事件流、清定时器、停在跑回合），但不归档、不轮换令牌。
+- 挂回前过两道闸门（是否仍在白名单、`sessionPolicy` 是否变化），不满足就不硬塞旧会话。
+- 新增 `src/persona-memory.js`、`src/persona-sessions.js` 两个纯函数模块，配套 11 + 31 项单测。
+
+**云端部署套件（`deploy/`）**
+
+- `01-base.sh`：时区、swap、Docker、Node 22、fail2ban、ufw 一键就绪（幂等）。
+- `02-snowluma.sh`：SnowLuma 容器化运行，显式数据卷、固定 noVNC 密码、日志轮转；
+  启动前要求阅读 SnowLuma EULA（不代用户接受）。
+- `03-bridge.sh`：安装桥接到 `/opt/qq-bridge`、写 Linux 版 `config.json`、装 systemd 单元。
+- `04-dsh-plugins.sh`：把 `qq-mode` 命名空间、人格预设、三个 MCP server 接通到 DSH，
+  并校验 `cordis.patch.yml` 里的 MCP 区块（缺了会出现「所有 qq_* 工具都不在白名单」）。
+- `dsh-web.service`、`qq-bridge.service`、`snowluma-configperm.timer`、`tunnel.ps1`、`nginx-hexo.conf`。
+
+**本地管理面板（`deploy/panel/`）**
+
+- 一个批处理：起 SSH 隧道 + 本地仪表盘，关窗即断隧道，并在桌面生成快捷方式。
+- 面板聚合三个入口（桥接控制台 / SnowLuma WebUI / noVNC 扫码），展示服务器信息与资源占用、
+  systemd 服务状态、机器人信息与群列表、四个来源的运行日志。
+
+**备份与迁移**
+
+- `06-export.sh`（服务器侧打包 `config.json` / `state` / `roles` / 人格预设，附 sha256 清单）
+- `07-import-local.ps1`（本地解包、自动改回本机路径、重建预设 patch）
+
+**控制台**
+
+- 新增「重启 DSH」按钮与 `POST /api/dsh/restart`（systemd 或直接进程两种部署都能用）。
+- 人格切换的提示改为「已接回 N 个会话上下文 / M 个人格会话已暂存」。
+
+### 修复与加固
+
+- 人格预设改动不生效：源 `agent.cordis.yml` 改了但 DSH 读的是生成的 `presets/*.patch.yml`，
+  现在 `scripts/build-agent-preset-patches.mjs --check` 可自检，部署脚本会提示重建。
+- MCP 未挂载导致的工具全拒：部署脚本内置 `cordis.patch.yml` 校验并给出验证命令。
+- 隐私：`.gitignore` 补充私钥/凭据/真实数据/安装包等规则，示例配置改用占位符，
+  新增 `npm run privacy-scan` 与 `.gitattributes`（脚本强制 LF，避免 `bash\r` 报错）。
+
+### 升级注意
+
+- `state/` 下新增 `persona-sessions/`；从旧版升级后，第一次切人格会为当前人格建立会话池。
+- 同一 QQ 号同一时刻只能有一个 SnowLuma 实例在线，本地与云端互顶会导致「能连上但收不到消息」。
+- 运行环境：Node ≥ 22.13、DSH ≥ 0.2.1、SnowLuma（其 EULA 禁止随第三方安装包或镜像分发，需自行获取）。
+
+---
+
+## 上游版本
+
+本 fork 之前的历史（`v0.2.1-r1` 及更早）由上游维护，见
+[Derpyu520/qq-bridge 的 Releases](https://github.com/Derpyu520/qq-bridge/releases)。
