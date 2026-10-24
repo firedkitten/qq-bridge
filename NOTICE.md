@@ -52,7 +52,7 @@
 | `deploy/04-dsh-plugins.sh` | 把本仓库 `plugins/` 挂进 DSH profile，并**挂载三个 MCP server**（漏这一步会导致所有 `qq_*` 工具不存在） |
 | `deploy/06-export.sh` / `deploy/07-import-local.ps1` | 把服务器上的状态打包回本地 |
 | `deploy/dsh-web.service`、`deploy/qq-bridge.service` | 两个 systemd 单元 |
-| `deploy/nginx-hexo.conf` | 同机跑 Hexo 博客时的 nginx 站点 |
+| `deploy/nginx-hexo.conf` | 同机跑 Hexo 博客时的 nginx 站点（**本机专用，已在 `.gitignore` 中，不随仓库分发**） |
 | `deploy/config.linux.json` | Linux 版配置模板（已去 Windows 专属字段） |
 | `deploy/tunnel.ps1` | 本地开 SSH 隧道（服务器/私钥/用户名走参数或环境变量，不写死） |
 | `deploy/panel/` | 本地管理面板：先起 SSH 隧道，再用浏览器看服务状态、日志、三个入口（控制台 / SnowLuma WebUI / noVNC） |
@@ -61,7 +61,7 @@
 
 - `public/console.html` + `src/bridge.js`：新增「重启 DSH」按钮与 `POST /api/dsh/restart`（systemd 单元可通过 `QQ_BRIDGE_DSH_UNIT` 覆盖）。
 - `.gitattributes`：固定 `*.sh` / `*.service` / `*.conf` 为 LF（否则在 Windows 上检出成 CRLF，scp 到 Linux 后 `bash` 直接报 `bad interpreter`）。
-- 文档：`docs/云端部署选型与厂商对比.md`、`docs/本机部署与运维笔记.md` 为新增的部署笔记（已脱敏）。
+- 文档：`docs/云端部署选型与厂商对比.md` 为新增的部署笔记（已脱敏）；`docs/本机部署与运维笔记.md` 记录的是本机环境细节，已移出仓库（`.gitignore` 忽略）。
 
 ## 4. 安全与合规
 

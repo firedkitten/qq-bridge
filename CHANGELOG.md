@@ -28,7 +28,8 @@
 - `03-bridge.sh`：安装桥接到 `/opt/qq-bridge`、写 Linux 版 `config.json`、装 systemd 单元。
 - `04-dsh-plugins.sh`：把 `qq-mode` 命名空间、人格预设、三个 MCP server 接通到 DSH，
   并校验 `cordis.patch.yml` 里的 MCP 区块（缺了会出现「所有 qq_* 工具都不在白名单」）。
-- `dsh-web.service`、`qq-bridge.service`、`snowluma-configperm.timer`、`tunnel.ps1`、`nginx-hexo.conf`。
+- `dsh-web.service`、`qq-bridge.service`、`snowluma-configperm.timer`、`tunnel.ps1`；
+  `nginx-hexo.conf`（同机跑 Hexo 用的 nginx 站点样板）自 v0.1.0 后改为**本机专用、不入库**。
 
 **本地管理面板（`deploy/panel/`）**
 
