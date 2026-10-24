@@ -201,14 +201,17 @@ sec docker
 docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}' 2>/dev/null || echo ""
 sec bot
 if [ -n "$T" ]; then
-  curl -s --max-time 5 -X POST -H 'content-type: application/json' -H "Authorization: Bearer $T" -d '{}' http://127.0.0.1:3000/get_login_info
+  # no_cache：跟 get_group_list 一样，不带的话可能拿到启动时的缓存昵称（改完 QQ 昵称这里不变）。
+  curl -s --max-time 5 -X POST -H 'content-type: application/json' -H "Authorization: Bearer $T" -d '{"no_cache":true}' http://127.0.0.1:3000/get_login_info
   echo
 else
   echo '{"status":"failed","wording":"未找到 OneBot token"}'
 fi
 sec groups
 if [ -n "$T" ]; then
-  curl -s --max-time 5 -X POST -H 'content-type: application/json' -H "Authorization: Bearer $T" -d '{}' http://127.0.0.1:3000/get_group_list
+  # no_cache 必须带：SnowLuma/NapCat 的 get_group_list 默认返回进程启动时的缓存，
+  # 群改名、成员数变化都不会反映（实测：缓存里还是旧名字+2 人，no_cache 才是 111+5 人）。
+  curl -s --max-time 5 -X POST -H 'content-type: application/json' -H "Authorization: Bearer $T" -d '{"no_cache":true}' http://127.0.0.1:3000/get_group_list
   echo
 else
   echo '{"status":"failed","data":[]}'
@@ -225,6 +228,10 @@ const LOG_SCRIPTS = {
   'sl-app': (n) => `tail -n ${n} /opt/snowluma/data/logs/snowluma-*.log 2>/dev/null | tail -n ${n}`,
   dsh: (n) => `journalctl -u dsh-web -n ${n} --no-pager -o cat 2>/dev/null`
 };
+
+// 从 dsh-web 的启动日志里抠出内部登录链接的 token（形如 `dsh web: http://127.0.0.1:3080/?token=xxx`）。
+// 用 journalctl 而不是 systemctl show：日志轮转后仍能拿到最近一次启动打印的那条。
+const DSH_TOKEN_SCRIPT = String.raw`journalctl -u dsh-web --no-pager 2>/dev/null | grep -a 'dsh web: http' | tail -1 | sed -E 's/.*\?token=//'`;
 
 // ---------------------------------------------------------------- 解析
 
@@ -345,8 +352,32 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, JSON.stringify({ ok: true, tunnel: tunnelState, uptimeMs: Date.now() - tunnelSince }));
     }
 
+    // 机器人头像：由面板代取腾讯图床，浏览器只跟 127.0.0.1 打交道。
+    // 这样即使本机连不上 qlogo、或被浏览器当成第三方资源拦掉，头像也照样能显示。
+    if (url.pathname === '/api/avatar') {
+      const uin = String(url.searchParams.get('uin') || '').replace(/[^0-9]/g, '');
+      if (!uin) return send(res, 400, JSON.stringify({ ok: false, error: 'uin 必填（只接受数字）' }));
+      try {
+        const r = await fetch(`https://q1.qlogo.cn/g?b=qq&nk=${uin}&s=640`, {
+          redirect: 'follow',
+          signal: AbortSignal.timeout(8000)
+        });
+        if (!r.ok) return send(res, 502, JSON.stringify({ ok: false, error: `头像拉取失败：HTTP ${r.status}` }));
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (!buf.length) return send(res, 502, JSON.stringify({ ok: false, error: '头像为空' }));
+        res.writeHead(200, {
+          'content-type': r.headers.get('content-type') || 'image/jpeg',
+          'cache-control': 'public, max-age=3600',
+          'content-length': buf.length
+        });
+        return res.end(buf);
+      } catch (err) {
+        return send(res, 502, JSON.stringify({ ok: false, error: `头像拉取失败：${err?.message ?? err}` }));
+      }
+    }
+
     if (url.pathname === '/api/status') {
-      const data = await cached('status', 4000, async () => {
+      const readStatus = async () => {
         const r = await sshCapture(STATUS_SCRIPT, 22000);
         if (r.code !== 0 && !r.out.includes('@@host')) {
           return { ok: false, error: (r.err || '').trim() || `ssh 退出码 ${r.code}`, tunnel: tunnelState, at: new Date().toISOString() };
@@ -356,6 +387,25 @@ const server = http.createServer(async (req, res) => {
         } catch (err) {
           return { ok: false, error: `解析失败：${err?.message ?? err}`, tunnel: tunnelState };
         }
+      };
+      // 面板每 5 秒轮询一次，4 秒缓存足够顶住刷新狂点；?fresh=1 是"立即刷新"按钮用的，绕过缓存
+      const data = url.searchParams.get('fresh') === '1'
+        ? await readStatus()
+        : await cached('status', 4000, readStatus);
+      return send(res, 200, JSON.stringify(data));
+    }
+
+    // 服务器 DSH web 的登录令牌：dsh web 启动时把它打在服务日志里
+    // （`dsh web: http://127.0.0.1:3080/?token=...`），每次重启都会换新的，
+    // 所以这里现取而不是写进 panel.config.json。
+    if (url.pathname === '/api/dsh-token') {
+      const data = await cached('dsh-token', 5000, async () => {
+        const r = await sshCapture(DSH_TOKEN_SCRIPT, 15000);
+        const token = (r.out || '').trim().split(/\s+/).filter(Boolean).pop() || '';
+        if (!token || !/^[A-Za-z0-9_-]{20,}$/.test(token)) {
+          return { ok: false, error: (r.err || '').trim() || '没有在 dsh-web 日志里找到 token（是不是还没启动过？）' };
+        }
+        return { ok: true, token, at: new Date().toISOString() };
       });
       return send(res, 200, JSON.stringify(data));
     }

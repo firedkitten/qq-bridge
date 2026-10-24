@@ -18,13 +18,25 @@
 
 | 区块 | 内容 |
 | --- | --- |
-| 入口 | qq-bridge 控制台（自动带 token）、SnowLuma WebUI `:5099`、QQ 扫码桌面 `:6081`，并直接显示 noVNC 密码 |
+| 入口 | qq-bridge 控制台（自动带 token）、SnowLuma WebUI `:5099`、QQ 扫码桌面 `:6081`、服务器 DSH（点击时现取登录 token 再跳转，免去翻 journalctl），并直接显示 noVNC 密码 |
 | 服务器 | 主机名 / 系统 / 内核 / 虚拟化 / 运行时长 |
 | 资源占用 | CPU 核心数、负载、内存条、磁盘条（>75% 变黄，>90% 变红） |
 | 服务状态 | qq-bridge、dsh-web、snowluma-configperm.timer 的 active/其他 |
-| 机器人 | 昵称、QQ 号、已加入的群（群名 + 人数） |
+| 机器人 | 昵称、QQ 号、已加入的群。每行群的排版是「第一行=群名称（过长省略，悬停看全名）/ 第二行=群号 / 右侧=当前成员数 ÷ 群人数上限 + 占用条」。成员数是**实时**取的：`get_group_list` 必须带 `no_cache:true`，否则 SnowLuma 返回的是进程启动时的缓存（群改名、新人进群都不会变）。断线时整块变灰而不是清空，顶部有「xs 前」数据年龄与「立即刷新」 |
 | 运行环境 | node / docker 版本、运行中的容器 |
 | 运行日志 | bridge / snowluma 容器 / snowluma 应用日志 / dsh，四个 tab，5 秒自动刷新 |
+
+## 右下角工具坞（深色 / 浅色）
+
+页面右下角常驻一个圆形按钮组，目前只有「深色 / 浅色」一个按钮：
+
+- 点一下在深色与**白色简约**浅色之间切换，选择存在 `localStorage`（`panel-theme`），刷新后保持。
+- 浅色主题只覆盖颜色变量（`[data-theme="light"]`），卡片、进度条、日志框、徽章都跟着变，结构没动。
+- 结构是特意留好的：以后加「切换语言」「设置」等，**不用改 CSS / HTML**，在 `dashboard.html` 末尾调
+  `window.panelDock.add({ id, icon, label, tip, onClick, pressed })` 即可，新按钮会自动叠在主题按钮上方
+  （容器是 `flex-direction: column-reverse`，主题按钮永远在最下面）。
+
+> 注意：这个工具坞在**本地面板 7788** 上。服务器上的 qq-bridge 控制台（`:3100`）没有它，保持原样。
 
 ## 端口映射
 
@@ -69,5 +81,22 @@
 | 服务状态全红 | 服务器上 systemd 服务停了：`ssh` 进去 `systemctl status qq-bridge dsh-web` |
 | noVNC 密码不对 | 容器重建后会随机换密码：`docker logs snowluma 2>&1 | grep -i "remote desktop password"`，同步改 `panel.config.json` 的 `vncPassword` |
 | 日志一片空白 | 该服务确实没输出；换另一个 tab 看 |
+| 点「服务器 DSH」还是 401 | `dsh-web` 从没启动过（日志里没有 `dsh web: http` 那行），或日志被清了：`journalctl -u dsh-web --no-pager | grep 'dsh web: http' | tail -1` 手动看一眼 |
+| 数值看着不动 | 先看标题右侧的「更新于 … · xs 前」：秒数在走说明轮询正常，只是数据没变；点「立即刷新」可绕过 4 秒缓存强制重读 |
 
 隧道日志和 ssh 的原始报错在 `deploy\panel\run\tunnel.log`（自动生成）。
+
+## 面板接口（自己写脚本时有用）
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/status` | 全部状态，服务端缓存 4 秒 |
+| `GET /api/status?fresh=1` | 同上但绕过缓存（「立即刷新」按钮用它） |
+| `GET /api/logs?src=bridge\|snowluma\|sl-app\|dsh&n=300` | 日志，缓存 2 秒，n 限 20~800 |
+| `GET /api/dsh-token` | 从 `journalctl -u dsh-web` 里取当前 DSH 登录 token（缓存 5 秒） |
+| `GET /api/avatar?uin=<QQ>` | 转取机器人头像（服务器侧代取腾讯图床，成功时 `cache-control: public, max-age=3600`） |
+| `GET /api/config` | 面板配置里对前端可见的字段（consoleToken / vncPassword / 端口映射） |
+
+> 说明：DSH 的登录链接是 `http://127.0.0.1:3080/?token=<43 位>`，用一次就换成 cookie，之后直接开 3380 即可。token 每次重启 `dsh-web` 都会变，所以面板不把它写进配置，而是点击时现取。
+>
+> 头像：机器人卡片的头像是 `GET /api/avatar?uin=<QQ>` 转出来的（服务端拿一次、缓存 1 小时）。前端把 `?t=<小时>` 拼进 URL，所以换了头像最多 1 小时自动刷到新的；拉不到时退回 🐟 图标，不会留破图。机器人昵称/群名称都带 `no_cache` 现取（SnowLuma 默认返回进程启动时的缓存，群改名、新人进群都不会反映，见下方故障表）。
