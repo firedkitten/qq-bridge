@@ -66,3 +66,40 @@ docs/guides/VOICE.md
 # 语音库（用户个人音频素材，config.json 的 socialV2.voice.dir 指向此处）
 audio/
 
+
+# 服务器私钥（绝不入库）
+*.pem
+_import-backup-*
+
+# ── 云端部署：个人配置与物证（含真实服务器 IP / 控制台令牌 / 私钥路径）──────────
+# 原则：脚本模板进仓库，**填好真实值的副本**不进。
+/.known_hosts
+/deploy/panel/.known_hosts
+/deploy/panel/panel.config.json
+/deploy/panel/panel.config.json.bak
+/deploy/panel/.runtime/
+
+# 一键启动器：写死了「我这台机器的仓库路径 + 我的私钥文件名 + 我的服务器 IP」，
+# 属于个人环境，不随项目发布（通用用法见 deploy/README.md）。
+/deploy/*.cmd
+
+# 一次性排查脚本（部署当天临时写的，不是项目的一部分）
+/deploy/_*.sh
+/deploy/_*.ps1
+
+# 部署 / 会话留痕：里面有明文的控制台令牌、SnowLuma 初始密码、noVNC 密码、服务器 IP、
+# 真实 QQ 号。留档价值在本地，不入公开仓库；要分享时另做脱敏副本。
+/部署留痕-*.md
+/会话总结-*.md
+/部署手册-*.md
+
+# ── SnowLuma 官方 Windows 发行包（111 MB / 89 个文件）────────────────────────
+# 三条理由都不允许入库：
+#  ① 体积：二进制 + ffmpeg + sqlite 预编译产物；
+#  ② 隐私：随包带出的 config/onebot_<QQ>.json（OneBot 令牌）、config/webui.json、
+#     data/<QQ>/*.db（真实聊天记录）都是本机自己的数据；
+#  ③ 授权：EULA §5.4 禁止并入第三方安装包 / 镜像分发，随本项目发布等于再分发。
+/SnowLuma-v2.1.1-win-x64/
+
+# 临时排查脚本与截图（每次调试都会重建）
+/_tmp/

@@ -2536,6 +2536,11 @@ button:active:not(:disabled) {
         <button id="clearWsBtn" class="danger">清空 QQ 聊天工作区</button>
         <span class="meta" id="clearWsMsg"></span>
       </div>
+      <div class="row" style="margin-top:10px">
+        <button id="restartDshBtn">重启 DSH</button>
+        <span class="meta" id="restartDshMsg"></span>
+      </div>
+      <div class="meta">「重启 DSH」只对服务器部署生效（systemd 单元 <code>dsh-web</code>，可用环境变量 <code>QQ_BRIDGE_DSH_UNIT</code> 改名）；本地手动启动的 DSH 无法由此按钮管理，会提示你手动重启。</div>
       <div class="meta">由守护窗口启动时，重启后 5 秒自动恢复；清空工作区会归档全部 QQ 会话并清空活动日志。</div>
     </section>
 <section id="section-notify" data-page="operations" class="card span-all">
@@ -3043,9 +3048,17 @@ document.getElementById('closedPreset').addEventListener('change', async () => {
 });
 document.getElementById('roleSet').addEventListener('click', async () => {
   const r = await api('/api/role', 'POST', { role: document.getElementById('roleInput').value.trim() });
-  if (r.ok) refreshRoles(); else alert(r.error || '设置失败');
+  if (!r.ok) { alert(r.error || '设置失败'); return; }
+  // C2：换人格同时换轻量记忆、并退役旧 DSH 会话（上下文不跨人格），把结果说清楚。
+  const reset = Number(r.resetSessions) || 0;
+  setRoleMsg(`✅ 已切换到「${r.role}」${reset ? `，已重置 ${reset} 个会话上下文` : ''}`, true);
+  refreshRoles(); refresh();
 });
-document.getElementById('roleClear').addEventListener('click', async () => { await api('/api/role', 'POST', { role: null }); refreshRoles(); refresh(); });
+document.getElementById('roleClear').addEventListener('click', async () => {
+  const r = await api('/api/role', 'POST', { role: null });
+  if (r.ok) setRoleMsg(`✅ 已清除人格${Number(r.resetSessions) ? `，已重置 ${Number(r.resetSessions)} 个会话上下文` : ''}`, true);
+  refreshRoles(); refresh();
+});
 document.getElementById('roleCreate').addEventListener('click', async () => {
   const name = document.getElementById('newRoleName').value.trim();
   const content = document.getElementById('newRoleContent').value.trim();
@@ -3177,6 +3190,26 @@ document.getElementById('restartBtn').addEventListener('click', async () => {
   if (!confirm('确定重启桥接？')) return;
   const r = await api('/api/restart', 'POST', {});
   document.getElementById('restartMsg').textContent = r.message || '正在重启…';
+});
+document.getElementById('restartDshBtn').addEventListener('click', async () => {
+  if (!confirm('确定重启 DSH？\n\n服务器部署（systemd 单元 dsh-web）会自动重启并让桥接重连；\n本地手动启动的 DSH 无法由此按钮管理，只会提示你手动重启。\n重启会中断进行中的 QQ 对话。')) return;
+  const el = document.getElementById('restartDshMsg');
+  el.className = 'meta';
+  el.textContent = '正在重启…';
+  let r;
+  try {
+    r = await api('/api/dsh/restart', 'POST', {});
+  } catch (error) {
+    el.className = 'meta err';
+    el.textContent = '❌ ' + (error?.message || '重启失败');
+    return;
+  }
+  el.className = r.ok ? 'meta ok' : 'meta err';
+  el.textContent = (r.ok ? '✅ ' : '❌ ') + (r.message || r.error || '重启失败');
+  if (r.command) {
+    el.title = r.command;
+    console.warn(r.command);
+  }
 });
 document.getElementById('clearWsBtn').addEventListener('click', async () => {
   if (!confirm('确定清空整个「QQ 聊天」工作区？\n将归档全部 QQ 会话、清除所有上下文映射、清空活动日志。\n此操作不可撤销。')) return;

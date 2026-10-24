@@ -54,6 +54,12 @@ import {
   applyStickerNote,
   markStickerUsed
 } from './sticker-lib.js';
+// 人格记忆存档（C2）：切人格时把轻量记忆按人格分开存/装，见 src/persona-memory.js。
+import {
+  extractMemory as extractPersonaMemory,
+  applyMemory as applyPersonaMemory,
+  missingKeys as personaMissingKeys
+} from './persona-memory.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -633,6 +639,47 @@ function sanitizeRoleName(name) {
   return String(name ?? '').replace(/[^\w\u4e00-\u9fff-]/g, '');
 }
 
+// ── 人格记忆存档（C2）──────────────────────────────────────────────────
+//
+// 为什么要单独存一份：轻量记忆原本只按会话存，人格只是每条消息前拼的提示词，
+// 于是切人格不换记忆 —— 「傲娇助手」会接着「小鲸鱼」答应过的事往下说。
+// 这里按人格把三类记忆（话题/念头/群友印象）各存一个文件，切人格时换着装。
+//
+// 文件：state/persona-memory/<人格名>.json，人格名为空时用 `_none.json`。
+// 只存记忆、不存会话配置（wakeConfig / 最近消息队列等仍按会话存，切人格不该把
+// 「这个群几点该闭嘴」也改掉）。
+const PERSONA_MEMORY_DIR = path.join(STATE_DIR, 'persona-memory');
+
+function personaArchivePath(role) {
+  const name = sanitizeRoleName(role) || '_none';
+  return path.join(PERSONA_MEMORY_DIR, name + '.json');
+}
+
+function readPersonaArchive(role) {
+  const doc = readJsonSafe(personaArchivePath(role), null);
+  if (!doc || typeof doc !== 'object') return null;
+  return {
+    role: doc.role ?? null,
+    updatedAt: Number(doc.updatedAt) || 0,
+    conversations: doc.conversations && typeof doc.conversations === 'object' ? doc.conversations : {}
+  };
+}
+
+function writePersonaArchive(role, conversations) {
+  try {
+    fs.mkdirSync(PERSONA_MEMORY_DIR, { recursive: true });
+    atomicWriteJson(personaArchivePath(role), {
+      role: role ?? null,
+      updatedAt: Date.now(),
+      conversations: conversations && typeof conversations === 'object' ? conversations : {}
+    });
+    return true;
+  } catch (error) {
+    log('保存人格记忆存档失败:', error?.message ?? error);
+    return false;
+  }
+}
+
 // 管理员 QQ（ownerQQ）规范化：空值=未设置；必须是正整数 QQ 号。
 function normalizeOwnerQQ(value) {
   if (value === undefined || value === null) return null;
@@ -1074,6 +1121,78 @@ function consolePortInUse() {
     // 探测不出来时保守认为「有人在跑」，宁可让用户手动删锁，也不要冒双实例的风险。
     return true;
   }
+}
+
+/**
+ * 重启「由 systemd 托管的 DSH」（默认单元 `dsh-web`，可用 QQ_BRIDGE_DSH_UNIT 覆盖）。
+ *
+ * 为什么只做服务器、不做本地：本地 DSH 是用户自己开的进程（守护窗口/终端/IDE），
+ * 桥接既不知道它怎么启动的，也没有权限去停它 —— 那种情况只能手动重启。
+ * 所以这里只在 Linux 且单元真实存在时才动手，其余情况返回可读的拒绝原因，
+ * 由前端原样显示（本地部署看到的就是「请手动重启」）。
+ *
+ * 需要给运行桥接的用户一条**只针对这一个单元**的免密 sudo 规则，见 manualDshCommand()。
+ */
+const DSH_UNIT = process.env.QQ_BRIDGE_DSH_UNIT || 'dsh-web';
+
+function manualDshCommand() {
+  const nodeBin = process.execPath;
+  const unitPath = `/etc/systemd/system/${DSH_UNIT}.service`;
+  const user = process.env.SUDO_USER || 'qqbridge';
+  return [
+    `# 需要给运行桥接的用户一条只作用于 ${DSH_UNIT} 的免密规则（一次即可）：`,
+    `echo '${user} ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${DSH_UNIT}, /usr/bin/systemctl is-active ${DSH_UNIT}' | sudo tee /etc/sudoers.d/qq-bridge-dsh && sudo chmod 0440 /etc/sudoers.d/qq-bridge-dsh`,
+    `# 注意：若服务单元里写了 NoNewPrivileges=true，sudo 会报 "The no new privileges flag is set"，需要先去掉该项再 daemon-reload。`,
+    `# 或者手动重启：sudo systemctl restart ${DSH_UNIT}`,
+    `（单元文件：${unitPath}，node：${nodeBin}）`,
+  ].join('\n');
+}
+
+function restartManagedDsh() {
+  const done = (ok, message, extra = {}) => ({ ok, message, ...extra });
+  if (process.platform !== 'linux') {
+    return done(false, '当前不是 Linux（没有 systemd），DSH 由本地进程托管，请手动重启 DSH。');
+  }
+  const run = (cmd, args) => {
+    try {
+      const out = execFileSync(cmd, args, { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+      return { code: 0, out: String(out ?? '').trim() };
+    } catch (error) {
+      const out = String(error?.stderr ?? '').trim() || String(error?.stdout ?? '').trim() || String(error?.message ?? '');
+      return { code: Number(error?.status) || 1, out };
+    }
+  };
+  // 先确认单元存在：没有单元就是「本地部署/单元名不对」，此时给命令而不是硬报错。
+  const cat = run('systemctl', ['cat', DSH_UNIT]);
+  if (cat.code !== 0) {
+    return done(false, `没有找到 systemd 单元 ${DSH_UNIT}：DSH 可能不是由 systemd 托管的，请手动重启。`, {
+      detail: cat.out.slice(0, 400),
+      command: manualDshCommand(),
+    });
+  }
+  // 以 root 跑就直接调 systemctl；否则走免密 sudo（规则只覆盖这两个动词 + 这一个单元）。
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  const restarted = isRoot
+    ? run('systemctl', ['restart', DSH_UNIT])
+    : run('sudo', ['-n', 'systemctl', 'restart', DSH_UNIT]);
+  if (restarted.code !== 0) {
+    const denied = /password is required|a terminal is required|not allowed|no tty/i.test(restarted.out);
+    return done(
+      false,
+      denied
+        ? `没有权限重启 ${DSH_UNIT}：缺少免密 sudo 规则。`
+        : `重启 ${DSH_UNIT} 失败：${restarted.out.split('\n').slice(-1)[0] || `退出码 ${restarted.code}`}`,
+      { detail: restarted.out.slice(0, 600), command: manualDshCommand() },
+    );
+  }
+  const active = run('systemctl', ['is-active', DSH_UNIT]);
+  const state = active.out.split('\n').pop()?.trim() || '';
+  if (state && state !== 'active') {
+    return done(false, `已执行重启，但 ${DSH_UNIT} 当前状态是 ${state}，请查看 journalctl -u ${DSH_UNIT} -n 50。`, {
+      detail: active.out.slice(0, 400),
+    });
+  }
+  return done(true, `DSH 已重启（systemd 单元 ${DSH_UNIT}，状态 ${state || 'active'}），桥接会自动重连。`);
 }
 
 function acquireLock() {
@@ -2818,6 +2937,50 @@ async function main() {
     }
   }
 
+  // ── 人格切换（C2）────────────────────────────────────────────────────
+  //
+  // 一个入口做完四件事（`POST /api/role` 与 QQ 的 `/role` 都走这里，避免两处行为分叉）：
+  //   1. 先把**当前人格**的三类轻量记忆落盘（state/persona-memory/<旧人格>.json）
+  //   2. 写 current-role.json
+  //   3. 把**目标人格**的存档装回内存（没有存档 = 空白人格，不会继承别人的记忆）
+  //   4. retireSession 掉所有 DSH 会话映射 → 下条消息新建会话，上下文也不再跨人格
+  //
+  // 为什么第 4 步用 retireSession 而不是清 sessions.json：它会顺带轮换 agentToken、
+  // 停掉旧会话上还在跑的回合与定时器、退订事件流，这些都是「换了个脑子」时该做的事。
+  // 代价是旧对话在 DSH 侧归档（控制台「会话与审批」还能看到），不是彻底删除。
+  function switchPersona(nextRole, { retire = true } = {}) {
+    const prev = readRoleState();
+    const prevRole = prev.role ?? null;
+    const target = nextRole ?? null;
+    if (prevRole === target) {
+      return { changed: false, prevRole, nextRole: target, retired: 0, applied: 0, missing: [] };
+    }
+    // 1) 存档旧人格。写盘失败继续（不能因为存档失败就切不过去），但要吼一声。
+    if (!writePersonaArchive(prevRole, extractPersonaMemory(socialV2.conversations))) {
+      log(`控制台：人格切换前存档失败（${prevRole ?? '（无）'}），这次切换可能丢失该人格的最新记忆`);
+    }
+    // 2) 换人格。mode 不变：静默/活跃是「说话的意愿」，不属于人格。
+    writeRoleState(target, prev.mode);
+    // 3) 装载目标人格
+    const archive = readPersonaArchive(target);
+    const archiveConversations = archive?.conversations ?? {};
+    const applied = applyPersonaMemory(socialV2.conversations, archiveConversations);
+    const missing = personaMissingKeys(socialV2.conversations, archiveConversations);
+    saveSocialV2State();
+    // 4) 清上下文
+    let retired = 0;
+    if (retire) {
+      for (const key of Object.keys(state.sessions)) {
+        retireSession(key);
+        retired += 1;
+      }
+      saveState();
+    }
+    log(`控制台：人格切换 ${prevRole ?? '（无）'} → ${target ?? '（无）'}；装载记忆 ${applied} 个会话，重置 DSH 会话 ${retired} 个`
+      + (missing.length ? `；另有 ${missing.length} 个会话只在存档里、当前没有状态对象：${missing.join(', ')}` : ''));
+    return { changed: true, prevRole, nextRole: target, retired, applied, missing };
+  }
+
   let flushingQueue = false;
   let flushQueueAgain = false;
   const flushQueue = async () => {
@@ -3517,21 +3680,45 @@ async function main() {
         }
         if (req.method === 'POST' && url.pathname === '/api/role') {
           const body = await readBody();
-          const rs = readRoleState();
           if (body.role && typeof body.role === 'string') {
             const name = sanitizeRoleName(body.role);
             if (!fs.existsSync(path.join(ROOT, 'roles', name + '.md'))) {
               sendJson({ ok: false, error: `角色「${name}」不存在（roles/${name}.md）` }, 400);
               return;
             }
-            writeRoleState(name, rs.mode);
-            log(`控制台：角色已设置为 ${name}`);
-            sendJson({ ok: true, role: name });
+            const r = switchPersona(name);
+            sendJson({
+              ok: true,
+              role: name,
+              // C2：换人格同时换记忆与上下文，回包把这几个数透出来，控制台能提示「已重置 N 个会话」。
+              resetSessions: r.retired,
+              memoryConversations: r.applied,
+              archivedRole: r.prevRole,
+              changed: r.changed
+            });
           } else {
-            writeRoleState(null, rs.mode);
-            log('控制台：角色已清除');
-            sendJson({ ok: true, role: null });
+            const r = switchPersona(null);
+            sendJson({
+              ok: true,
+              role: null,
+              resetSessions: r.retired,
+              memoryConversations: r.applied,
+              archivedRole: r.prevRole,
+              changed: r.changed
+            });
           }
+          return;
+        }
+        // 人格记忆存档：只读查看，方便排查「这个人格记得什么」。
+        if (req.method === 'GET' && url.pathname === '/api/role-memory') {
+          const role = (url.searchParams.get('role') || '').trim();
+          const archive = readPersonaArchive(role || null);
+          sendJson({
+            ok: true,
+            role: role || null,
+            updatedAt: archive?.updatedAt ?? 0,
+            conversations: archive?.conversations ?? {}
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/role-mode') {
@@ -3623,6 +3810,13 @@ async function main() {
           const rs = readRoleState();
           const switched = rs.role === from;
           if (switched) writeRoleState(to, rs.mode);
+          // 人格记忆存档跟着改名，否则重命名后记忆留在旧名下，看起来像「换了个人就失忆」。
+          try {
+            const fromArchive = personaArchivePath(from);
+            if (fs.existsSync(fromArchive)) fs.renameSync(fromArchive, personaArchivePath(to));
+          } catch (error) {
+            log('重命名人格记忆存档失败:', error?.message ?? error);
+          }
           log(`控制台：人格重命名「${from}」→「${to}」${switched ? '（当前启用中，已跟随切换）' : ''}`);
           sendJson({ ok: true, role: to, renamed: true, currentFollowed: switched });
           return;
@@ -3635,7 +3829,13 @@ async function main() {
           fs.rmSync(roleFilePath(name));
           const rs = readRoleState();
           const cleared = rs.role === name;
-          if (cleared) writeRoleState(null, rs.mode);
+          // 删掉的正好是当前人格 → 走 switchPersona(null)：清人格、清上下文，一并归档后丢弃记忆。
+          if (cleared) switchPersona(null);
+          try {
+            fs.rmSync(personaArchivePath(name), { force: true });
+          } catch (error) {
+            log('删除人格记忆存档失败:', error?.message ?? error);
+          }
           log(`控制台：删除人格「${name}」${cleared ? '（该人格正在启用，已同时清除当前人格）' : ''}`);
           sendJson({ ok: true, deleted: name, clearedCurrent: cleared });
           return;
@@ -7178,6 +7378,13 @@ async function main() {
           }, 500);
           return;
         }
+        // ── 重启 DSH（服务器部署：systemd 单元 dsh-web；本地自启会返回手动重启提示） ──
+        if (req.method === 'POST' && url.pathname === '/api/dsh/restart') {
+          const result = restartManagedDsh();
+          log(`控制台：请求重启 DSH → ${result.message}`);
+          sendJson(result, result.ok ? 200 : 501);
+          return;
+        }
         sendJson({ ok: false, error: 'not found' }, 404);
       } catch (error) {
         const status = Number(error?.statusCode) || 500;
@@ -8601,6 +8808,9 @@ async function main() {
         };
       }
       atomicWriteJson(SOCIAL_V2_FILE, obj);
+      // 顺手镜像到「当前人格」的记忆存档：切人格时靠这份存档装回记忆，所以运行中
+      // 新产生的记忆必须随每次保存同步，否则下次切换就会退回上次切换时的旧记忆。
+      writePersonaArchive(readRoleState().role ?? null, extractPersonaMemory(socialV2.conversations));
     } catch (error) {
       log('保存 socialV2 状态失败:', error?.message ?? error);
     }
@@ -10943,16 +11153,18 @@ async function main() {
       }
       if (plainContent === '/role' || plainContent.startsWith('/role ')) {
         const name = sanitizeRoleName(plainContent.slice(5).trim());
+        // C2：/role 与控制台走同一个 switchPersona，切换即重置上下文，行为必须一致。
+        const resetHint = (r) => (r?.retired ? `（已重置 ${r.retired} 个会话上下文）` : '');
         if (!name || name === 'off' || name === 'clear') {
-          writeRoleState(null, roleState.mode);
-          await sendToQQ(key, '已清除角色，恢复正常人格。');
+          const r = switchPersona(null);
+          await sendToQQ(key, `已清除角色，恢复正常人格。${resetHint(r)}`);
         } else {
           const roleFile = path.join(ROOT, 'roles', name + '.md');
           if (!fs.existsSync(roleFile)) {
             await sendToQQ(key, `角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
           } else {
-            writeRoleState(name, roleState.mode);
-            await sendToQQ(key, `已切换角色：${name}。`);
+            const r = switchPersona(name);
+            await sendToQQ(key, `已切换角色：${name}。${resetHint(r)}`);
           }
         }
         return;

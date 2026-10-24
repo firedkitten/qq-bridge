@@ -1,0 +1,28 @@
+[Unit]
+Description=DSH Web（DeepSeek Harness 的 /api，供 qq-bridge 调用）
+Documentation=file:///opt/qq-bridge/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qqbridge
+Group=qqbridge
+# 让 DSH_HOME 落在 /opt/qq-bridge/.dsh：bridge 也是从这个路径读 client-connection 签名密钥
+WorkingDirectory=/opt/qq-bridge
+Environment=HOME=/opt/qq-bridge
+Environment=DSH_HOME=/opt/qq-bridge/.dsh
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Shanghai
+# 只监听回环，公网永远不直接暴露
+ExecStart=/usr/local/bin/dsh web --no-open --host 127.0.0.1 --port 3080
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dsh-web
+
+[Install]
+WantedBy=multi-user.target

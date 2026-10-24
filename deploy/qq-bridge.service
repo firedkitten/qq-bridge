@@ -1,0 +1,32 @@
+[Unit]
+Description=qq-bridge (QQ <-> DeepSeek 桥接)
+Documentation=file:///opt/qq-bridge/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+# 容器可能是 later 才起来，桥接自己有重连，不用强依赖
+
+[Service]
+Type=simple
+User=qqbridge
+Group=qqbridge
+WorkingDirectory=/opt/qq-bridge
+Environment=NODE_ENV=production
+Environment=TZ=Asia/Shanghai
+Environment=HOME=/opt/qq-bridge
+# Node 由 01-base.sh 从 mirrors.aliyun.com 解压到 /usr/local，不在 /usr/bin
+ExecStart=/usr/local/bin/node /opt/qq-bridge/src/bridge.js
+Restart=always
+RestartSec=5
+# 优雅退出：QQ 会话/状态都在 state/ 下，别用 SIGKILL 打断写盘
+KillSignal=SIGINT
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qq-bridge
+# 不用 NoNewPrivileges：控制台的「重启 DSH」按钮要经 sudo 调 systemctl restart dsh-web，
+# 该开关置 true 会让 sudo 直接报 "The no new privileges flag is set" 而失效。
+# 这项能力已被 /etc/sudoers.d/qq-bridge-dsh 限定到「仅 dsh-web 单元的 restart/is-active」。
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+{
+  "_说明": "复制成 panel.config.json 再填真实值。panel.config.json 已被 .gitignore 忽略，不要提交。",
+  "host": "<服务器公网IP>",
+  "user": "root",
+  "key": "../../id_ed25519",
+  "consoleToken": "<控制台访问令牌>",
+  "vncPassword": "<noVNC 密码>",
+  "botQQ": "<机器人QQ>",
+  "panelPort": 7788,
+  "forwards": [
+    [3100, 3100],
+    [5099, 5099],
+    [6081, 6081],
+    [3380, 3080]
+  ]
+}
