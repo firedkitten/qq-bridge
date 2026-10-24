@@ -40,6 +40,7 @@
     "test:preset-prompt": "node scripts/test-preset-prompt.mjs",
     "test:role-card": "node scripts/test-role-card.mjs",
     "test:persona-memory": "node scripts/test-persona-memory.mjs",
+    "test:persona-sessions": "node scripts/test-persona-sessions.mjs",
     "preview:console": "node scripts/console-ui-fixture.mjs",
     "verify:adaptation": "node scripts/verify-dsh-021-adaptation.mjs",
     "test:dsh-auth": "node scripts/test-dsh-auth.mjs",

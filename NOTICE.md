@@ -31,12 +31,14 @@
 |---|---|
 | `src/persona-memory.js` | **新增**。纯函数模块：`extractMemory` / `applyMemory` / `normalizeMemory` / `missingKeys` / `isMemoryEmpty`，只处理三类字段（话题、待说未说、群友印象） |
 | `scripts/test-persona-memory.mjs` | **新增**。11 项断言的单测 |
-| `src/bridge.js` | 新增 `switchPersona()`（存档旧人格 → 写 `current-role.json` → 装载新人格 → `retireSession` 重置会话）；`/api/role` 与 QQ `/role` 命令改走它；新增只读接口 `GET /api/role-memory?role=`；`saveSocialV2State()` 末尾镜像写入人格存档；人格重命名/删除时连带维护存档文件 |
-| `public/console.html` | 切换人格后显示「已重置 N 个会话上下文」并刷新列表 |
-| `package.json` | 新增 `test:persona-memory` 脚本 |
+| `src/persona-sessions.js` | **新增**。纯数据模块：`buildArchive` / `normalizeArchive` / `planRestore` / `archiveSummary`，负责人格↔会话映射与令牌的快照与还原 |
+| `scripts/test-persona-sessions.mjs` | **新增**。31 项断言的单测（key 校验、脏数据兜底、还原两道闸门） |
+| `src/bridge.js` | 新增 `switchPersona()`（存档旧人格记忆与会话 → 写 `current-role.json` → 装载新人格记忆与会话 → 把目标人格未接管的老会话「脱钩」但**不归档**）；新增 `capturePersonaSessions` / `restorePersonaSessions` / `detachSessionForPersona`；`/api/role` 与 QQ `/role` 命令改走它；新增只读接口 `GET /api/role-memory?role=`；`saveSocialV2State()` 末尾镜像写入人格存档；人格重命名/删除时连带维护存档文件 |
+| `public/console.html` | 切换人格后显示「已接回 N 个会话上下文 / M 个人格会话已暂存」并刷新列表 |
+| `package.json` | 新增 `test:persona-memory`、`test:persona-sessions` 脚本 |
 | `docs/guides/PERSONA_MEMORY.md` | **新增**。方案取舍（C1/C2/B）、行为规格、存档结构、接口、运维手册 |
 
-上游行为：换人格只换提示词，记忆与上下文都按会话共享。本仓库的行为：记忆按人格分开存，切人格同时开新会话（旧对话在 DSH 侧归档，不删除）。
+上游行为：换人格只换提示词，记忆与上下文都按会话共享。本仓库的行为：**记忆和会话映射都按人格分开存**，切人格是「换轨」而不是「清空」—— 各自的对话留在各自人格名下，切回来接回原会话继续聊；正在切换的那一刻不属于目标人格的会话全部脱钩（停回合、退事件流），但不归档、不删。这是本仓库相对上游的**行为性不兼容**：同一条消息在两个人格下会落到两个不同的 DSH 会话。
 
 ### 3.2 云端部署套件（`deploy/`）
 

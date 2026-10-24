@@ -3049,14 +3049,20 @@ document.getElementById('closedPreset').addEventListener('change', async () => {
 document.getElementById('roleSet').addEventListener('click', async () => {
   const r = await api('/api/role', 'POST', { role: document.getElementById('roleInput').value.trim() });
   if (!r.ok) { alert(r.error || '设置失败'); return; }
-  // C2：换人格同时换轻量记忆、并退役旧 DSH 会话（上下文不跨人格），把结果说清楚。
-  const reset = Number(r.resetSessions) || 0;
-  setRoleMsg(`✅ 已切换到「${r.role}」${reset ? `，已重置 ${reset} 个会话上下文` : ''}`, true);
+  // C2 第二步：切人格是「换轨」不是「清空」—— 各人格有自己的会话，切回来会接回原对话。
+  const restored = Number(r.restoredSessions) || 0;
+  const kept = Number(r.keptSessions) || 0;
+  const detail = restored ? `，已接回 ${restored} 个会话上下文`
+    : (kept ? `，${kept} 个人格会话已暂存（切回来可继续）` : '');
+  setRoleMsg(`✅ 已切换到「${r.role}」${detail}`, true);
   refreshRoles(); refresh();
 });
 document.getElementById('roleClear').addEventListener('click', async () => {
   const r = await api('/api/role', 'POST', { role: null });
-  if (r.ok) setRoleMsg(`✅ 已清除人格${Number(r.resetSessions) ? `，已重置 ${Number(r.resetSessions)} 个会话上下文` : ''}`, true);
+  if (r.ok) {
+    const restored = Number(r.restoredSessions) || 0;
+    setRoleMsg(`✅ 已清除人格${restored ? `，已接回 ${restored} 个会话上下文` : ''}`, true);
+  }
   refreshRoles(); refresh();
 });
 document.getElementById('roleCreate').addEventListener('click', async () => {

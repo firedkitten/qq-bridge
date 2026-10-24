@@ -60,6 +60,15 @@ import {
   applyMemory as applyPersonaMemory,
   missingKeys as personaMissingKeys
 } from './persona-memory.js';
+// 人格会话存档（C2 第二步）：把「这个 QQ 会话属于哪个 DSH 会话 + 该人格的 agentToken」
+// 也按人格分开存，切回来接回原会话而不是新建。见 src/persona-sessions.js。
+import {
+  buildArchive as buildPersonaSessionArchive,
+  normalizeArchive as normalizePersonaSessionArchive,
+  emptyArchive as emptyPersonaSessionArchive,
+  planRestore as planPersonaSessionRestore,
+  archiveSummary as personaSessionSummary
+} from './persona-sessions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -676,6 +685,46 @@ function writePersonaArchive(role, conversations) {
     return true;
   } catch (error) {
     log('保存人格记忆存档失败:', error?.message ?? error);
+    return false;
+  }
+}
+
+// 人格会话存档（C2 第二步）：state/persona-sessions/<人格名>.json
+//   { role, updatedAt, sessions: { "<key>": "<sessionId>" },
+//     policies: { "<key>": "<policy JSON>" }, tokens: { "<key>": "<agentToken>" } }
+//
+// 和 persona-memory 分开放，是因为两者的失效条件不同：记忆是「读得懂就行」，
+// 会话映射是「挂回去必须还能用」—— 后者会因为 DSH 侧会话被删/模式变化而整体作废，
+// 混在一个文件里就会互相拖累。
+const PERSONA_SESSIONS_DIR = path.join(STATE_DIR, 'persona-sessions');
+
+function personaSessionPath(role) {
+  const name = sanitizeRoleName(role) || '_none';
+  return path.join(PERSONA_SESSIONS_DIR, name + '.json');
+}
+
+function readPersonaSessionArchive(role) {
+  const doc = readJsonSafe(personaSessionPath(role), null);
+  if (!doc || typeof doc !== 'object') return emptyPersonaSessionArchive();
+  return normalizePersonaSessionArchive({
+    sessions: doc.sessions,
+    policies: doc.policies,
+    tokens: doc.tokens
+  });
+}
+
+function writePersonaSessionArchive(role, archive) {
+  try {
+    fs.mkdirSync(PERSONA_SESSIONS_DIR, { recursive: true });
+    const a = normalizePersonaSessionArchive(archive);
+    atomicWriteJson(personaSessionPath(role), {
+      role: role ?? null,
+      updatedAt: Date.now(),
+      ...a
+    });
+    return true;
+  } catch (error) {
+    log('保存人格会话存档失败:', error?.message ?? error);
     return false;
   }
 }
@@ -2939,46 +2988,140 @@ async function main() {
 
   // ── 人格切换（C2）────────────────────────────────────────────────────
   //
-  // 一个入口做完四件事（`POST /api/role` 与 QQ 的 `/role` 都走这里，避免两处行为分叉）：
-  //   1. 先把**当前人格**的三类轻量记忆落盘（state/persona-memory/<旧人格>.json）
-  //   2. 写 current-role.json
-  //   3. 把**目标人格**的存档装回内存（没有存档 = 空白人格，不会继承别人的记忆）
-  //   4. retireSession 掉所有 DSH 会话映射 → 下条消息新建会话，上下文也不再跨人格
+  // 一个入口做完五件事（`POST /api/role` 与 QQ 的 `/role` 都走这里，避免两处行为分叉）：
+  //   1. 把**当前人格**的三类轻量记忆落盘（state/persona-memory/<旧人格>.json）
+  //   2. 把**当前人格**的会话映射 + 各会话 agentToken 落盘（state/persona-sessions/<旧人格>.json）
+  //   3. 写 current-role.json，再装载**目标人格**的记忆与会话映射
+  //      （没有存档 = 空白人格，不会继承别人的记忆，也不会继承别人的对话）
+  //   4. 没被目标人格接回去的会话一律「脱钩」：退订事件流、清定时器、停掉在跑的回合，
+  //      但**不归档、不删 DSH 侧会话** —— 下次切回来要靠它接回原对话
+  //   5. 目标人格自己的会话重新 follow，映射写回 state.sessions
   //
-  // 为什么第 4 步用 retireSession 而不是清 sessions.json：它会顺带轮换 agentToken、
-  // 停掉旧会话上还在跑的回合与定时器、退订事件流，这些都是「换了个脑子」时该做的事。
-  // 代价是旧对话在 DSH 侧归档（控制台「会话与审批」还能看到），不是彻底删除。
+  // 为什么不继续用 retireSession：它的语义是「这个会话永远不要了」——
+  // 会 archiveSession 掉 DSH 会话并轮换 agentToken。人格切换只是「先放一放」，
+  // 用 retire 就等于每次切人格都把对方那半对话烧掉（C2 第一版就是这么干的）。
+  // 令牌按人格存：切回哪个人格，就装回那个人格当时的令牌，互不通用。
+  /**
+   * 把一个会话从当前人格身上「脱钩」：退订事件流、清定时器与缓存、停掉在跑的回合，
+   * 但**不删 DSH 侧会话、不轮换 agentToken** —— 这两件事是 retireSession 的语义
+   * （「这个会话永远不要了」），人格切换只是「先放一放，切回来还要接」。
+   */
+  function detachSessionForPersona(key, sessionId) {
+    forgetConversationCaches(key);
+    reverse.delete(sessionId);
+    api.events.forget?.(sessionId);
+    const entry = pending.get(key);
+    if (entry) { clearTimeout(entry.timer); void cancelPendingEntry(entry).catch(() => {}); }
+    pending.delete(key);
+    clearSocialV2Timers(key);
+    cancelSocialTimers(key);
+    disarmPendingWakeLease(key);
+    pendingWakeKeys.delete(key);
+    const st = socialV2.conversations.get(key);
+    if (st) {
+      st.bootstrapSent = false;
+      st.modelSeenSeqs = new Set();
+    }
+    delete state.sessions[key];
+    delete state.sessionPolicies[key];
+    // 只停这一轮的工作，不归档：DSH 侧会话要留着给「切回来」用。
+    void (async () => {
+      try { await withTimeout(api.stopSessionWork(sessionId), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
+      catch (error) { log(`⚠️ 切换人格时停止旧会话回合失败 ${key}：${error?.message ?? error}`); }
+    })();
+  }
+
+  /** 把「当前人格」的会话映射与各会话 agentToken 拍快照存盘。 */
+  function capturePersonaSessions(role) {
+    const sessions = {};
+    const policies = {};
+    const tokens = {};
+    for (const [key, sessionId] of Object.entries(state.sessions)) {
+      sessions[key] = sessionId;
+      policies[key] = state.sessionPolicies[key] ?? '';
+      tokens[key] = socialV2.conversations.get(key)?.agentToken ?? '';
+    }
+    const snapshot = buildPersonaSessionArchive({ sessions, policies, tokens });
+    if (!writePersonaSessionArchive(role, snapshot)) return { count: 0, withToken: 0, saved: false };
+    return { ...personaSessionSummary(snapshot), saved: true };
+  }
+
+  /** 把「目标人格」存下的会话挂回来（只挂 policy 未变且当前仍准入的）。 */
+  function restorePersonaSessions(role) {
+    const sessionArchive = readPersonaSessionArchive(role);
+    const { restore, skipped } = planPersonaSessionRestore(sessionArchive, sessionPolicy, isSessionAllowedInCurrentMode);
+    let restored = 0;
+    let minted = 0;
+    for (const item of restore) {
+      const { key, sessionId } = item;
+      state.sessions[key] = sessionId;
+      state.sessionPolicies[key] = sessionPolicy(key);
+      // 按人格存令牌：挂回哪个会话，就把该人格当时用的令牌装回去；
+      // 该人格从未发过令牌则现造一枚（同一人格内保持稳定，不会每次切换都变）。
+      const st = socialV2.conversations.get(key);
+      if (st) {
+        st.agentToken = item.token || crypto.randomBytes(24).toString('hex');
+        rememberAgentToken(key, st.agentToken);
+        st.bootstrapSent = false;
+        st.modelSeenSeqs = new Set();
+        if (!item.token) { sessionArchive.tokens[key] = st.agentToken; minted += 1; }
+      }
+      reverse.set(sessionId, key);
+      try { api.events.follow(sessionId); }
+      catch (error) { log(`恢复会话 ${key} 的事件订阅失败：${error?.message ?? error}`); }
+      restored += 1;
+    }
+    // 补造出来的新令牌要回写存档，否则下次切回来又会换一枚。
+    if (minted > 0) writePersonaSessionArchive(role, sessionArchive);
+    return { restored, skipped };
+  }
+
   function switchPersona(nextRole, { retire = true } = {}) {
     const prev = readRoleState();
     const prevRole = prev.role ?? null;
     const target = nextRole ?? null;
     if (prevRole === target) {
-      return { changed: false, prevRole, nextRole: target, retired: 0, applied: 0, missing: [] };
+      return {
+        changed: false, prevRole, nextRole: target, retired: 0, applied: 0, missing: [],
+        restoredSessions: 0, keptSessions: 0, skipped: []
+      };
     }
-    // 1) 存档旧人格。写盘失败继续（不能因为存档失败就切不过去），但要吼一声。
+    // 1) 存档旧人格的三类轻量记忆。写盘失败继续（不能因为存档失败就切不过去），但要吼一声。
     if (!writePersonaArchive(prevRole, extractPersonaMemory(socialV2.conversations))) {
       log(`控制台：人格切换前存档失败（${prevRole ?? '（无）'}），这次切换可能丢失该人格的最新记忆`);
     }
-    // 2) 换人格。mode 不变：静默/活跃是「说话的意愿」，不属于人格。
+    // 2) 存档旧人格的会话映射与 agentToken（切回来靠它接回原对话，而不是新建）
+    const kept = capturePersonaSessions(prevRole);
+    // 3) 换人格。mode 不变：静默/活跃是「说话的意愿」，不属于人格。
     writeRoleState(target, prev.mode);
-    // 3) 装载目标人格
+    // 4) 装载目标人格的记忆
     const archive = readPersonaArchive(target);
     const archiveConversations = archive?.conversations ?? {};
     const applied = applyPersonaMemory(socialV2.conversations, archiveConversations);
     const missing = personaMissingKeys(socialV2.conversations, archiveConversations);
     saveSocialV2State();
-    // 4) 清上下文
+    // 5) 全部会话先脱钩，再把目标人格自己的会话挂回来
     let retired = 0;
+    let restored = 0;
+    let skipped = [];
     if (retire) {
-      for (const key of Object.keys(state.sessions)) {
-        retireSession(key);
+      for (const [key, sessionId] of Object.entries(state.sessions)) {
+        detachSessionForPersona(key, sessionId);
         retired += 1;
       }
-      saveState();
+      const r = restorePersonaSessions(target);
+      restored = r.restored;
+      skipped = r.skipped;
     }
-    log(`控制台：人格切换 ${prevRole ?? '（无）'} → ${target ?? '（无）'}；装载记忆 ${applied} 个会话，重置 DSH 会话 ${retired} 个`
-      + (missing.length ? `；另有 ${missing.length} 个会话只在存档里、当前没有状态对象：${missing.join(', ')}` : ''));
-    return { changed: true, prevRole, nextRole: target, retired, applied, missing };
+    saveState();
+    log(`控制台：人格切换 ${prevRole ?? '（无）'} → ${target ?? '（无）'}；装载记忆 ${applied} 个会话，`
+      + `暂存 ${kept.count ?? 0} 个会话映射，恢复 ${restored} 个上下文，脱钩 ${retired} 个`
+      + (skipped.length ? `；${skipped.length} 个未挂回（${skipped.map((s) => `${s.key}:${s.reason}`).join(', ')}）` : '')
+      + (missing.length ? `；另有 ${missing.length} 个会话只在记忆存档里、当前没有状态对象：${missing.join(', ')}` : ''));
+    return {
+      changed: true, prevRole, nextRole: target, retired, applied, missing,
+      restoredSessions: restored, keptSessions: kept.count ?? 0, skipped
+    };
   }
 
   let flushingQueue = false;
@@ -3690,8 +3833,11 @@ async function main() {
             sendJson({
               ok: true,
               role: name,
-              // C2：换人格同时换记忆与上下文，回包把这几个数透出来，控制台能提示「已重置 N 个会话」。
+              // C2 第二步：切人格不再丢上下文 —— 每个人格各有一份会话映射，
+              // 切走时存下、切回时装回；resetSessions 现在是「脱钩」数而非「销毁」数。
               resetSessions: r.retired,
+              restoredSessions: r.restoredSessions,
+              keptSessions: r.keptSessions,
               memoryConversations: r.applied,
               archivedRole: r.prevRole,
               changed: r.changed
@@ -3702,6 +3848,8 @@ async function main() {
               ok: true,
               role: null,
               resetSessions: r.retired,
+              restoredSessions: r.restoredSessions,
+              keptSessions: r.keptSessions,
               memoryConversations: r.applied,
               archivedRole: r.prevRole,
               changed: r.changed
@@ -11153,18 +11301,20 @@ async function main() {
       }
       if (plainContent === '/role' || plainContent.startsWith('/role ')) {
         const name = sanitizeRoleName(plainContent.slice(5).trim());
-        // C2：/role 与控制台走同一个 switchPersona，切换即重置上下文，行为必须一致。
-        const resetHint = (r) => (r?.retired ? `（已重置 ${r.retired} 个会话上下文）` : '');
+        // C2：/role 与控制台走同一个 switchPersona，行为必须一致。
+        // 现在切人格是「换轨」而不是「清空」：切回来会接回原会话，所以文案不能再说"重置"。
+        const switchHint = (r) => (r?.restoredSessions ? `（已接回 ${r.restoredSessions} 个会话上下文）`
+          : (r?.retired ? `（本会话首次建立，${r.retired} 个旧会话已暂存）` : ''));
         if (!name || name === 'off' || name === 'clear') {
           const r = switchPersona(null);
-          await sendToQQ(key, `已清除角色，恢复正常人格。${resetHint(r)}`);
+          await sendToQQ(key, `已清除角色，恢复正常人格。${switchHint(r)}`);
         } else {
           const roleFile = path.join(ROOT, 'roles', name + '.md');
           if (!fs.existsSync(roleFile)) {
             await sendToQQ(key, `角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
           } else {
             const r = switchPersona(name);
-            await sendToQQ(key, `已切换角色：${name}。${resetHint(r)}`);
+            await sendToQQ(key, `已切换角色：${name}。${switchHint(r)}`);
           }
         }
         return;

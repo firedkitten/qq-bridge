@@ -15,7 +15,7 @@
 | [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与三个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
 | [guides/VOICE.md](guides/VOICE.md) | 语音发送全解：独立工具（`voice-tool/` 的图形界面与命令行）、桥接 CLI、AI 工具、控制台面板，以及**工具拆出后的配置解析顺序** | ✅ 2026 整理时已更新（工具移到上一级 `voice-tool/`） |
 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) | 控制台「令牌与花费」看板：数据来源、计价口径（峰谷分时）、API、配置 | ✅ |
-| [guides/PERSONA_MEMORY.md](guides/PERSONA_MEMORY.md) | **人格记忆隔离（C2）**：切人格 = 换记忆 + 换上下文——为什么做、三个方案取舍、切换时序、存档格式、接口、边界、运维与回退 | ✅ 2026-10-24 新增 |
+| [guides/PERSONA_MEMORY.md](guides/PERSONA_MEMORY.md) | **人格记忆与会话隔离（C2）**：切人格 = 换记忆 + 换会话池——为什么做、C2 一版到二版的演进、切换五步、脱钩 vs 归档、两份存档格式、接口、边界、运维与回退 | ✅ 2026-10-24 新增 |
 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) | 控制台离线预览（`npm run preview:console`）与离线浏览器回归（`npm run test:console-ui`）怎么用 | ✅ 2026 整理时自 `scripts/` 移入 |
 | [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) | **安全基线与威胁模型**：威胁主体、已实现的边界（准入/工具面/出站/控制台/落盘/网络）、已知残余风险、发布前回归清单、改动检查单 | ✅ **改动安全相关代码前必读**（2026-09-20 新增） |
 

@@ -52,7 +52,8 @@
 }
 ```
 
-- `key` 相对 `panel\` 目录，也可以用绝对路径。
+- `key` 相对 `panel\` 目录，也可以用绝对路径；文件名不限（`id_ed25519`、`_yzxmm.pem` 都行）。
+- 启动脚本的私钥检查也读这里（`key-path.cjs`），所以换私钥只改 `panel.config.json`，不用动 `.cmd`。
 - 换服务器只改 `host` / `user` / `key` / `consoleToken`。
 - `forwards` 是 `[本地端口, 服务器端口]` 的数组；面板的入口按钮和端口标签会自动跟着它变，改完重启面板即可。
 - 本地端口被占（比如 3100 已有别的程序）就改 `forwards` 左边的数，比如 `[13100, 3100]`。
@@ -61,9 +62,9 @@
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 窗口一闪而过 | 装了 Node 却没在 PATH 里，或 `id_ed25519` 不在仓库根目录；脚本会停住并提示 |
+| 窗口一闪而过 | 装了 Node 却没在 PATH 里，或 `panel.config.json` 的 `key` 指向的私钥不存在；脚本会停住并打印实际路径 |
 | 桌面快捷方式没生成 | 现在由 `make-shortcut.vbs`（cscript）生成，失败才退到 `make-shortcut.ps1`。旧版失败是因为用户名带 `'`（如 `<你的用户名>`）会截断内联 PowerShell 的单引号字符串，已规避。彻底不行就手动：右键 `启动管理面板.cmd` → 发送到 → 桌面快捷方式 |
-| `UNPROTECTED PRIVATE KEY FILE` | 私钥权限太宽。修：`icacls "<仓库路径>\id_ed25519" /inheritance:r /grant:r "%USERNAME%:(R)"`（需管理员或对该文件有改权限） |
+| `UNPROTECTED PRIVATE KEY FILE` | 私钥权限太宽。修：`icacls "<panel.config.json 里 key 的绝对路径>" /inheritance:r /grant:r "%USERNAME%:(R)"`（需管理员或对该文件有改权限） |
 | 面板显示"隧道已断开（自动重连）" | 服务器 SSH 断了 / 网络抖动；它会 2s→30s 退避重连。看窗口日志 |
 | 服务状态全红 | 服务器上 systemd 服务停了：`ssh` 进去 `systemctl status qq-bridge dsh-web` |
 | noVNC 密码不对 | 容器重建后会随机换密码：`docker logs snowluma 2>&1 | grep -i "remote desktop password"`，同步改 `panel.config.json` 的 `vncPassword` |
