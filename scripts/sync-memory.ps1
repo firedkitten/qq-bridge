@@ -24,7 +24,10 @@ param(
   [ValidateSet('pull', 'push')][string]$Direction = 'pull',
   [switch]$Apply,
   [switch]$Force,
-  [int]$PruneDays = 14
+  [int]$PruneDays = 14,
+  # 间隔节流：距上一份快照不足这么多小时就直接退出（0 = 不节流）。
+  # 面板启动时用 -MinIntervalHours 20 调用，避免每开一次面板就拉一遍。
+  [int]$MinIntervalHours = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +58,19 @@ function Count-Lines([string]$Root, [string]$Pattern) {
 }
 
 if ($Direction -eq 'pull') {
+  if ($MinIntervalHours -gt 0) {
+    $last = Get-ChildItem $work -Directory -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like 'memory-*' } |
+      Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($last) {
+      $ageH = ((Get-Date) - $last.LastWriteTime).TotalHours
+      if ($ageH -lt $MinIntervalHours) {
+        Write-Host ("距上次快照 {0:N1} 小时，未到 {1} 小时，跳过（要强制拉取就不带 -MinIntervalHours）" -f $ageH, $MinIntervalHours)
+        return
+      }
+    }
+  }
+
   $existing = @()
   foreach ($p in $paths) {
     $check = (Invoke-Ssh "test -e '$RemoteRoot/$p' && echo yes || echo no").Trim()
