@@ -5414,9 +5414,11 @@ async function mdExport() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const disp = res.headers.get('content-disposition') || '';
-    const match = /filename="?([^";]+)"?/.exec(disp);
+    // 优先用 RFC 5987 的 filename*（可带中文），退回 ASCII 的 filename。
+    const star = /filename\*=UTF-8''([^;]+)/i.exec(disp);
+    const plain = /filename="?([^";]+)"?/.exec(disp);
     a.href = url;
-    a.download = match ? match[1] : 'memory-diary.json';
+    a.download = star ? decodeURIComponent(star[1]) : (plain ? plain[1] : 'memory-diary.json');
     a.click();
     URL.revokeObjectURL(url);
     showConsoleToast('已导出，可以带走换机器');

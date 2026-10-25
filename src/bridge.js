@@ -4527,10 +4527,15 @@ async function main() {
           for (const r of names) {
             bundle.roles[r] = { facts: readFacts(MEMORY_DIARY_DIR, r), diary: readDiary(MEMORY_DIARY_DIR, r) };
           }
-          const filename = `memory-diary-${only || 'all'}-${new Date().toISOString().slice(0, 10)}.json`;
+          const stamp = new Date().toISOString().slice(0, 10);
+          // HTTP 响应头只允许 ASCII：中文角色名直接写进 content-disposition 会让 Node 抛
+          // ERR_INVALID_CHAR，接口表现为 500「Invalid character in header content」。
+          // 因此给一个 ASCII 兜底名，再按 RFC 5987 用 filename* 附带真实（可能含中文）的名字。
+          const asciiName = `memory-diary-${only ? 'role' : 'all'}-${stamp}.json`;
+          const prettyName = `memory-diary-${only || 'all'}-${stamp}.json`;
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
-            "content-disposition": `attachment; filename="${filename}"`,
+            'content-disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(prettyName)}`,
             'cache-control': 'no-store',
           });
           res.end(Buffer.from(JSON.stringify(bundle, null, 2), 'utf8'));

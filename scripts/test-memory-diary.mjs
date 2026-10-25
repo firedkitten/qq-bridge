@@ -37,7 +37,7 @@ function call(port, pathname, { method = 'GET', headers = {}, body } = {}) {
         response.on('end', () => {
           let json = null;
           try { json = JSON.parse(data); } catch {}
-          resolve({ status: response.statusCode, body: data, json });
+          resolve({ status: response.statusCode, body: data, json, headers: response.headers });
         });
       }
     );
@@ -298,6 +298,33 @@ await test('生成交接单后新会话首次唤醒带上它，读一次即作�
       const second = h.buildWakePromptV2('private:789', 'question');
       assert.ok(!second.includes('【交接单'), '读过之后不得每轮重复注入');
       assert.ok(second.includes('名字：小周') || second.includes('小周'), '事实本身仍应照常注入');
+    });
+  } finally { await h.close(); }
+});
+
+// ── 9. 导出接口：中文角色名不得让响应头变非法（回归：曾 500） ─────────────────
+await test('导出接口在中文角色名下可用，响应头保持 ASCII', async () => {
+  const h = await bridgeHarness({
+    files: {
+      'state/current-role.json': { role: ROLE_A, mode: 'active' },
+      ...seedFiles(ROLE_A, { facts: [['名字：小周', 'identity']], diary: ['一起给猫起了名字'] }),
+    },
+  });
+  try {
+    await withServer(h, async (port) => {
+      const one = await call(port, '/api/memory-diary/export?role=' + encodeURIComponent(ROLE_A), { headers: ADMIN });
+      assert.equal(one.status, 200, `单个角色导出应 200，实际 ${one.status} ${one.body}`);
+      const parsed = JSON.parse(one.body);
+      assert.ok(parsed.roles?.[ROLE_A], '导出内容里应有该角色');
+      assert.ok(parsed.roles[ROLE_A].facts.length >= 1, '导出应带上事实');
+
+      const disp = String(one.headers['content-disposition'] ?? '');
+      assert.ok(disp.includes('filename='), `应给出下载文件名，实际 ${JSON.stringify(disp)}`);
+      assert.ok(/^[\x20-\x7e]+$/.test(disp), `content-disposition 必须是纯 ASCII，实际 ${JSON.stringify(disp)}`);
+      assert.ok(disp.includes("filename*=UTF-8''"), '应附带 RFC 5987 的 filename* 以还原中文名');
+
+      const all = await call(port, '/api/memory-diary/export', { headers: ADMIN });
+      assert.equal(all.status, 200, `全量导出也应 200，实际 ${all.status} ${all.body}`);
     });
   } finally { await h.close(); }
 });
