@@ -39,6 +39,8 @@ import {
   removeFact,
   searchFacts,
 } from '../qqbridge-tool/memory-diary/src/facts.js';
+// 档案留存（append-only）：写入/删除/轮转都留底稿，只给控制台看，绝不参与注入。
+import { archiveStats, listArchive, readArchive } from '../qqbridge-tool/memory-diary/src/archive.js';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
@@ -4539,6 +4541,17 @@ async function main() {
             'cache-control': 'no-store',
           });
           res.end(Buffer.from(JSON.stringify(bundle, null, 2), 'utf8'));
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/memory-diary/archive') {
+          // 档案只能看，不能改：没有写接口，也没有导入接口。
+          const role = targetRole(url.searchParams.get('role'));
+          if (!role) { sendJson({ ok: false, error: '缺少 role' }, 400); return; }
+          const days = listArchive(MEMORY_DIARY_DIR, role);
+          const kind = url.searchParams.get('kind') === 'fact' ? 'fact' : 'diary';
+          const date = String(url.searchParams.get('date') ?? '').trim();
+          const entries = date ? readArchive(MEMORY_DIARY_DIR, role, { kind, date }) : [];
+          sendJson({ ok: true, role, days, kind, date, entries, stats: archiveStats(MEMORY_DIARY_DIR, role) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/memory-diary/delete') {

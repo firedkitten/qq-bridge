@@ -329,6 +329,59 @@ await test('导出接口在中文角色名下可用，响应头保持 ASCII', as
   } finally { await h.close(); }
 });
 
+// ── 10. 档案留存接口：只读、按天可查、删除条目可回溯 ────────────────────────
+await test('档案接口能列出按天归档的写入与删除记录', async () => {
+  const h = await bridgeHarness({
+    files: { 'state/current-role.json': { role: ROLE_A, mode: 'active' } },
+  });
+  try {
+    await withServer(h, async (port) => {
+      const added = await call(port, '/api/memory-diary/add', {
+        method: 'POST',
+        headers: ADMIN,
+        body: { role: ROLE_A, store: 'diary', kind: 'event', text: '一起给猫起了名字', scope: 'private:1' },
+      });
+      assert.equal(added.status, 200, `写日记应成功，实际 ${added.status} ${added.body}`);
+
+      const list = await call(port, '/api/memory-diary/archive?role=' + encodeURIComponent(ROLE_A) + '&kind=diary', { headers: ADMIN });
+      assert.equal(list.status, 200, `档案列表应 200，实际 ${list.status} ${list.body}`);
+      const lr = JSON.parse(list.body);
+      assert.ok(Array.isArray(lr.days) && lr.days.length >= 1, '应至少有一天档案');
+      assert.ok(lr.stats.entries >= 1, '档案统计应有条目');
+
+      const day = lr.days[0];
+      const one = await call(
+        port,
+        `/api/memory-diary/archive?role=${encodeURIComponent(ROLE_A)}&kind=diary&date=${day.date}`,
+        { headers: ADMIN },
+      );
+      const or = JSON.parse(one.body);
+      assert.ok(or.entries.length >= 1, '该天应有条目');
+      assert.ok(or.entries.some((e) => e.action === 'write' && e.text.includes('猫')), '应留档写入');
+
+      // 删除后再看：工作文件里没了，档案里多一条 delete。
+      const del = await call(port, '/api/memory-diary/delete', {
+        method: 'POST',
+        headers: ADMIN,
+        body: { role: ROLE_A, store: 'diary', at: or.entries[0].at, text: '一起给猫起了名字', scope: 'private:1' },
+      });
+      assert.equal(del.status, 200, `删除应成功，实际 ${del.status} ${del.body}`);
+      const after = JSON.parse((await call(
+        port,
+        `/api/memory-diary/archive?role=${encodeURIComponent(ROLE_A)}&kind=diary&date=${day.date}`,
+        { headers: ADMIN },
+      )).body);
+      assert.ok(after.entries.some((e) => e.action === 'delete'), '删除动作也要留档');
+
+      // agent token 读不到档案（与控制台鉴权一致）
+      const denied = await call(port, '/api/memory-diary/archive?role=' + encodeURIComponent(ROLE_A), {
+        headers: { 'x-agent-token': 'whatever' },
+      });
+      assert.ok([401, 403].includes(denied.status), `agent token 应被拒，实际 ${denied.status}`);
+    });
+  } finally { await h.close(); }
+});
+
 if (failures) {
   console.error(`\n失败 ${failures} 项`);
   process.exitCode = 1;

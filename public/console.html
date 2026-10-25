@@ -1959,6 +1959,18 @@ button:active:not(:disabled) {
         <div class="meta" id="mdHandoffWarn" style="display:none;color:#d9534f"></div>
       </details>
 
+      <details class="settings-group">
+        <summary>档案留存（<span id="mdArchiveState">—</span>）</summary>
+        <div class="meta">写入、删除、轮转淘汰，每一条都会在这里留一份底稿——所以"删掉"只是不再带进对话，不是真的没了。档案只写不读，永远不进上下文。</div>
+        <div class="row">
+          <label>类型 <select id="mdArchiveKind"><option value="diary">日记</option><option value="fact">事实</option></select></label>
+          <label>日期 <select id="mdArchiveDay"></select></label>
+          <button id="mdArchiveLoad" class="small">查看这一天</button>
+          <button id="mdArchiveDownload" class="small">下载</button>
+        </div>
+        <pre class="slang-scroll" id="mdArchiveText" style="max-height:38vh;margin:0;white-space:pre-wrap">选一个日期，点「查看这一天」。</pre>
+      </details>
+
       <p class="meta">提示：事实和日记都不会写进「人格核心卡」。核心卡是人格目录下的 <code>persona-core/&lt;人格&gt;.md</code> 文件，只在控制台手工改、且改动要人确认——这是防性格漂移的最后一道闸。</p>
     </section>
 <section id="section-social-v1" data-page="social-v1" class="card span-all">
@@ -5319,6 +5331,7 @@ async function loadMemoryDiary() {
     mdRenderFacts();
     mdRenderDiary();
     mdHandoffRefresh();
+    mdArchiveRefresh();
     const counts = r.counts || {};
     const scopeText = mdState.scope ? mdScopeLabel(mdState.scope) : '全部会话';
     document.getElementById('mdStats').textContent = `${scopeText} · 事实 ${counts.facts ?? mdState.facts.length} 条 · 日记 ${counts.diary ?? mdState.diary.length} 条`;
@@ -5382,6 +5395,72 @@ function mdHandoffView() {
   if (!latest) { showConsoleToast('还没有交接单'); return; }
   const text = String(latest.markdown || '').slice(0, 6000) || JSON.stringify(latest, null, 2).slice(0, 6000);
   alert(text);
+}
+
+// ── 档案留存：只读底稿，不进上下文 ──────────────────────────────
+const mdArchive = { days: [], entries: [] };
+
+async function mdArchiveRefresh() {
+  const stateEl = document.getElementById('mdArchiveState');
+  const daySel = document.getElementById('mdArchiveDay');
+  if (!stateEl || !daySel) return;
+  if (!mdState.role) { stateEl.textContent = '—'; daySel.innerHTML = ''; return; }
+  const kind = (document.getElementById('mdArchiveKind') || {}).value === 'fact' ? 'fact' : 'diary';
+  try {
+    const qs = new URLSearchParams({ role: mdState.role, kind });
+    const r = await api('/api/memory-diary/archive?' + qs.toString());
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    mdArchive.days = (Array.isArray(r.days) ? r.days : []).filter((d) => d.kind === kind);
+    const stats = r.stats || {};
+    stateEl.textContent = mdArchive.days.length
+      ? `${mdArchive.days.reduce((n, d) => n + d.count, 0)} 条 · ${mdArchive.days.length} 天`
+      : '还没有档案';
+    daySel.innerHTML = mdArchive.days.length
+      ? mdArchive.days.map((d) => `<option value="${d.date}">${d.date} · ${d.count} 条</option>`).join('')
+      : '<option value="">（空）</option>';
+    const textEl = document.getElementById('mdArchiveText');
+    if (textEl) textEl.textContent = mdArchive.days.length ? '选一个日期，点「查看这一天」。' : '这个人格还没有产生档案。';
+    mdArchive.entries = [];
+  } catch (e) {
+    stateEl.textContent = '档案读取失败';
+  }
+}
+
+async function mdArchiveLoad() {
+  if (!mdState.role) { showConsoleToast('先选一个人格'); return; }
+  const kind = (document.getElementById('mdArchiveKind') || {}).value === 'fact' ? 'fact' : 'diary';
+  const date = (document.getElementById('mdArchiveDay') || {}).value || '';
+  const textEl = document.getElementById('mdArchiveText');
+  if (!date) { if (textEl) textEl.textContent = '这一天没有档案。'; return; }
+  try {
+    const qs = new URLSearchParams({ role: mdState.role, kind, date });
+    const r = await api('/api/memory-diary/archive?' + qs.toString());
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    mdArchive.entries = Array.isArray(r.entries) ? r.entries : [];
+    if (!mdArchive.entries.length) { textEl.textContent = '这一天没有档案。'; return; }
+    const actionLabel = { write: '写入', delete: '删除', rotate: '轮转淘汰' };
+    textEl.textContent = mdArchive.entries.map((e) => {
+      const when = e.at ? new Date(e.at).toLocaleString('zh-CN', { hour12: false }) : '';
+      const cat = e.cat ? ` · ${e.cat}` : (e.kind && e.kind !== kind ? ` · ${e.kind}` : '');
+      return `[${actionLabel[e.action] || e.action}] ${when}${cat}${e.conv ? ' · ' + e.conv : ''}\n${e.text || ''}`;
+    }).join('\n\n');
+  } catch (e) {
+    if (textEl) textEl.textContent = '读取失败：' + (e && e.message ? e.message : e);
+  }
+}
+
+function mdArchiveDownload() {
+  if (!mdState.role || !mdArchive.entries.length) { showConsoleToast('先点「查看这一天」'); return; }
+  const kind = (document.getElementById('mdArchiveKind') || {}).value === 'fact' ? 'fact' : 'diary';
+  const date = (document.getElementById('mdArchiveDay') || {}).value || 'day';
+  const body = mdArchive.entries.map((e) => JSON.stringify(e)).join('\n') + '\n';
+  const blob = new Blob([body], { type: 'application/jsonlines;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `archive-${kind}-${date}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
 }
 
 async function mdAdd(store) {
@@ -5470,6 +5549,9 @@ document.getElementById('mdImportFile').addEventListener('change', (event) => {
 });
 document.getElementById('mdFactAdd').addEventListener('click', () => mdAdd('facts'));
 document.getElementById('mdDiaryAdd').addEventListener('click', () => mdAdd('diary'));
+document.getElementById('mdArchiveKind').addEventListener('change', () => mdArchiveRefresh());
+document.getElementById('mdArchiveLoad').addEventListener('click', () => mdArchiveLoad());
+document.getElementById('mdArchiveDownload').addEventListener('click', () => mdArchiveDownload());
 document.getElementById('mdRole').addEventListener('change', () => {
   const scopeSel = document.getElementById('mdScope');
   if (scopeSel) scopeSel.value = '';

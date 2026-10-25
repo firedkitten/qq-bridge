@@ -43,7 +43,10 @@ function stripModeTags(heading) {
 export function parseRoleSections(text) {
   const sections = [];
   let current = null;
-  for (const line of String(text ?? '').split('\n')) {
+  // 按 /\r?\n/ 拆行：Windows 下保存的角色卡是 CRLF。只按 '\n' 拆会把每行的 '\r'
+  // 留在行尾，于是长度统计和控制台预览会多算几十个字符——一张 5955 字的卡被算成
+  // 6137 字，触发 6000 上限，注入时真的被切掉结尾。
+  for (const line of String(text ?? '').split(/\r?\n/)) {
     const heading = /^(#{1,6})\s+(.*)$/.exec(line);
     if (!heading) {
       if (!current) {

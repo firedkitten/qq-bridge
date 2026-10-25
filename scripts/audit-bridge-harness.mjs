@@ -29,6 +29,7 @@ import * as memoryFacts from '../qqbridge-tool/memory-diary/src/facts.js';
 // 人格内核草稿（新建人格时自动生成）：同样是 bridge.js 顶层 import，需注入同名绑定。
 import * as personaDraft from '../qqbridge-tool/memory-diary/src/persona-draft.js';
 import * as handoff from '../qqbridge-tool/memory-diary/src/handoff.js';
+import * as archive from '../qqbridge-tool/memory-diary/src/archive.js';
 // 角色卡解析：控制台保存人格时 roleWarnings() 会调 roleCharStats / roleSectionReport。
 import * as roleCard from '../src/role-card.js';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
@@ -198,7 +199,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
-    ...personaCore, ...memoryDiary, ...memoryFacts, ...personaDraft, ...handoff, ...roleCard,
+    ...personaCore, ...memoryDiary, ...memoryFacts, ...personaDraft, ...handoff, ...archive, ...roleCard,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。
     normalizeImageForModel: mediaNormalize.normalizeImageForModel,
     sniffImage: mediaNormalize.sniffImage,
