@@ -14,6 +14,31 @@ import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
+// 角色记忆 P1：人格内核（数据与模块都在 qqbridge-tool/memory-diary/，见同名方案文档）。
+import { PERSONA_CORE_MAX_CHARS, loadPersonaCore } from '../qqbridge-tool/memory-diary/src/persona-core.js';
+// 人格内核草稿：从角色卡抽骨架，新建人格时自动生成、改角色卡后可一键更新。
+import { draftCoreFile, roleCardHash } from '../qqbridge-tool/memory-diary/src/persona-draft.js';
+import {
+  HANDOFF_BLOCK_MAX_CHARS,
+  buildHandoff,
+  handoffBlock,
+  isHandoffPending,
+  markHandoffUsed,
+  readHandoff,
+  writeHandoff,
+} from '../qqbridge-tool/memory-diary/src/handoff.js';
+// 角色记忆 P2：事件日记（落盘 + 检索注入）。纯文件模块，不依赖桥接内部状态。
+import { DEFAULT_INJECT_CHARS, appendDiary, buildDiaryBlock, readDiary, removeDiary, searchDiary } from '../qqbridge-tool/memory-diary/src/diary.js';
+// 角色记忆 P3：长期事实（自动提炼用户画像 + 每轮带一小块回来）。
+import {
+  DEFAULT_FACTS_INJECT_CHARS,
+  appendFact,
+  buildFactsBlock,
+  extractFacts,
+  readFacts,
+  removeFact,
+  searchFacts,
+} from '../qqbridge-tool/memory-diary/src/facts.js';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
@@ -1096,6 +1121,15 @@ function loadConfig() {
   if (roleInjectMaxChars !== cfg.role.maxInjectChars) {
     log(`人格注入上限已按范围校正为 ${roleInjectMaxChars} 字符（配置值 ${cfg.role.maxInjectChars}，允许 1000~20000）`);
   }
+
+  // 事件日记（P2）：默认开启，每轮最多带 maxEntries 条、整块不超过 maxInjectChars 字符。
+  // `enabled: false` 或把文件删掉都不会出事：读取失败只跳过注入，写入失败只记一条日志。
+  cfg.diary = { enabled: true, maxInjectChars: DEFAULT_INJECT_CHARS, maxEntries: 6, ...(file.diary ?? {}) };
+  // 长期事实（P3）：预算比日记更紧——画像是底料，不该抢人设的戏。
+  cfg.facts = { enabled: true, maxInjectChars: DEFAULT_FACTS_INJECT_CHARS, maxEntries: 6, ...(file.facts ?? {}) };
+  // 交接单（P4）：remindAfterTurns>0 时，聊到这么多轮就在下一次唤醒前发一条提醒，
+  // **不自动换会话**——换不换、什么时候换由人在控制台决定；0 = 不提醒。
+  cfg.handoff = { enabled: true, remindAfterTurns: 40, notifyQQ: true, maxInjectChars: HANDOFF_BLOCK_MAX_CHARS, ...(file.handoff ?? {}) };
 
   return cfg;
 }
@@ -3931,8 +3965,20 @@ async function main() {
           catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
           if (fs.existsSync(roleFilePath(name))) { sendJson({ ok: false, error: `人格「${name}」已存在` }, 400); return; }
           writeRoleContent(name, content);
-          log(`控制台：创建人格「${name}」（${content.length} 字符）`);
-          sendJson({ ok: true, role: name, warnings: roleWarnings(content) });
+          // 顺手生成人格内核：新人格第一次被唤醒时就有锚，不依赖人记得手写。
+          // 生成失败不影响建人格本身，只在响应里回报原因。
+          let core = { created: false };
+          try {
+            if (!fs.existsSync(personaCoreFile(name))) {
+              const r = writeCoreForRole(name, { backup: false });
+              core = { created: true, chars: r.chars, warnings: r.warnings };
+            }
+          } catch (error) {
+            core = { created: false, error: error?.message ?? '生成内核失败' };
+            log(`自动生成人格内核失败「${name}」：${error?.message ?? error}`);
+          }
+          log(`控制台：创建人格「${name}」（${content.length} 字符${core.created ? `，内核 ${core.chars} 字` : ''}）`);
+          sendJson({ ok: true, role: name, warnings: roleWarnings(content), core });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/roles/update') {
@@ -3965,6 +4011,18 @@ async function main() {
           } catch (error) {
             log('重命名人格记忆存档失败:', error?.message ?? error);
           }
+          // 内核也跟着改名：内核按「角色名 = 文件名」匹配，不跟着改就等于新人格没有内核。
+          try {
+            const fromCore = personaCoreFile(from);
+            if (fs.existsSync(fromCore) && !fs.existsSync(personaCoreFile(to))) {
+              fs.renameSync(fromCore, personaCoreFile(to));
+              // front matter 里的 role 字段同步，免得预览/排查时对不上。
+              const text = fs.readFileSync(personaCoreFile(to), 'utf8').replace(/^role:\s*.*$/m, `role: ${to}`);
+              fs.writeFileSync(personaCoreFile(to), text, 'utf8');
+            }
+          } catch (error) {
+            log('重命名人格内核失败:', error?.message ?? error);
+          }
           log(`控制台：人格重命名「${from}」→「${to}」${switched ? '（当前启用中，已跟随切换）' : ''}`);
           sendJson({ ok: true, role: to, renamed: true, currentFollowed: switched });
           return;
@@ -3986,6 +4044,46 @@ async function main() {
           }
           log(`控制台：删除人格「${name}」${cleared ? '（该人格正在启用，已同时清除当前人格）' : ''}`);
           sendJson({ ok: true, deleted: name, clearedCurrent: cleared });
+          return;
+        }
+
+        // ── 人格内核：查看状态 / 按角色卡重新生成 ──────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/persona-core') {
+          let name;
+          try { name = validateRoleName(url.searchParams.get('role')); } catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
+          const meta = readCoreMeta(name);
+          sendJson({
+            ok: true,
+            role: name,
+            exists: Boolean(meta.exists),
+            draft: Boolean(meta.draft),
+            generated: Boolean(meta.generated),
+            stale: Boolean(meta.stale),
+            chars: meta.chars ?? 0,
+            hash: meta.hash ?? '',
+            body: meta.body ?? '',
+            file: meta.exists ? path.relative(ROOT, personaCoreFile(name)) : '',
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/persona-core/update') {
+          const body = await readBody();
+          let name;
+          try { name = validateRoleName(body.role); } catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
+          if (!fs.existsSync(roleFilePath(name))) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
+          try {
+            const meta = readCoreMeta(name);
+            // 已有内核默认不覆盖（可能是人手写的），要覆盖得显式 force，避免按错按钮把人工内核刷掉。
+            if (meta.exists && !body.force) {
+              sendJson({ ok: false, error: '这个角色已经有内核了，覆盖会丢掉手改内容', exists: true, generated: Boolean(meta.generated), stale: Boolean(meta.stale) }, 409);
+              return;
+            }
+            const r = writeCoreForRole(name);
+            log(`控制台：生成人格内核「${name}」（${r.chars} 字符${r.backupPath ? `，旧版备份 ${path.relative(ROOT, r.backupPath)}` : ''}）`);
+            sendJson({ ok: true, role: name, chars: r.chars, warnings: r.warnings, backup: r.backupPath ? path.relative(ROOT, r.backupPath) : '' });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? '生成内核失败' }, 500);
+          }
           return;
         }
 
@@ -4359,7 +4457,181 @@ async function main() {
           return;
         }
         // ── 会话查看 ──────────────────────────────────────────────────────────
-        if (req.method === 'GET' && url.pathname === '/api/sessions') {
+        // ── 角色记忆（P1 内核 / P2 日记 / P3 事实）控制台接口 ──────────
+      // 这些数据是操作者自己的人格资产：只给控制台，智能体一律拒绝。
+      if (url.pathname === '/api/memory-diary' || url.pathname.startsWith('/api/memory-diary/')
+          || url.pathname === '/api/handoff' || url.pathname.startsWith('/api/handoff/')) {
+        if (req.headers['x-agent-token']) {
+          sendJson({ ok: false, error: '该接口仅控制台可用' }, 403);
+          return;
+        }
+        const memoryDirRoles = () => {
+          try {
+            return fs.readdirSync(path.join(MEMORY_DIARY_DIR, 'state'), { withFileTypes: true })
+              .filter((d) => d.isDirectory())
+              .map((d) => d.name)
+              .sort();
+          } catch {
+            return [];
+          }
+        };
+        const targetRole = (raw) => sanitizeRoleName(String(raw ?? '').trim()) || sanitizeRoleName(readRoleState().role ?? '');
+        if (req.method === 'GET' && url.pathname === '/api/memory-diary') {
+          const role = targetRole(url.searchParams.get('role'));
+          const scope = String(url.searchParams.get('scope') ?? '').trim();
+          const allFacts = role ? readFacts(MEMORY_DIARY_DIR, role) : [];
+          const allDiary = role ? readDiary(MEMORY_DIARY_DIR, role) : [];
+          // 会话窗口清单：每个 conv 各算一栏，控制台用它做下拉框。
+          const tally = new Map();
+          const bump = (conv, field) => {
+            const k = String(conv ?? '');
+            const cur = tally.get(k) ?? { scope: k, facts: 0, diary: 0 };
+            cur[field] += 1;
+            tally.set(k, cur);
+          };
+          for (const f of allFacts) bump(f?.conv, 'facts');
+          for (const d of allDiary) bump(d?.conv, 'diary');
+          // 还没记过东西的窗口也列出来，方便第一次手动补记。
+          const known = (k) => /^(?:private|group):\d+$/.test(k);
+          try {
+            for (const k of Object.keys(state.sessions ?? {})) {
+              if (known(k) && !tally.has(k)) tally.set(k, { scope: k, facts: 0, diary: 0 });
+            }
+          } catch { /* 会话表不可读就不列 */ }
+          const ownerKey = `private:${String(cfg.ownerQQ ?? '')}`;
+          if (known(ownerKey) && !tally.has(ownerKey)) tally.set(ownerKey, { scope: ownerKey, facts: 0, diary: 0 });
+          const scopes = [...tally.values()].sort((a, b) => (a.scope < b.scope ? -1 : a.scope > b.scope ? 1 : 0));
+          // 通用条目（conv 为空）在每个窗口都算数，所以这里也用同一套口径。
+          const inScope = (entry) => {
+            const conv = String(entry?.conv ?? '');
+            return !scope || !conv || conv === scope;
+          };
+          const facts = allFacts.filter(inScope);
+          const diary = allDiary.filter(inScope);
+          sendJson({
+            ok: true,
+            role,
+            scope,
+            roles: memoryDirRoles(),
+            scopes,
+            facts: facts.slice().reverse(),
+            diary: diary.slice(-300).reverse(),
+            counts: { facts: facts.length, diary: diary.length },
+          });
+          return;
+        }
+        if (req.method === 'GET' && url.pathname === '/api/memory-diary/export') {
+          const only = targetRole(url.searchParams.get('role'));
+          const names = only ? [only] : memoryDirRoles();
+          const bundle = { version: 1, exportedAt: new Date().toISOString(), roles: {} };
+          for (const r of names) {
+            bundle.roles[r] = { facts: readFacts(MEMORY_DIARY_DIR, r), diary: readDiary(MEMORY_DIARY_DIR, r) };
+          }
+          const filename = `memory-diary-${only || 'all'}-${new Date().toISOString().slice(0, 10)}.json`;
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            "content-disposition": `attachment; filename="${filename}"`,
+            'cache-control': 'no-store',
+          });
+          res.end(Buffer.from(JSON.stringify(bundle, null, 2), 'utf8'));
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory-diary/delete') {
+          const body = await readBody();
+          const role = targetRole(body.role);
+          if (!role) { sendJson({ ok: false, error: '缺少 role' }, 400); return; }
+          const store = body.store === 'facts' ? 'facts' : 'diary';
+          const scope = String(body.scope ?? body.conv ?? '').trim();
+          const result = store === 'facts'
+            ? removeFact(MEMORY_DIARY_DIR, role, { at: body.at, text: body.text, conv: scope })
+            : removeDiary(MEMORY_DIARY_DIR, role, { at: body.at, text: body.text, conv: scope });
+          // 不用手动清缓存：读写都看文件 mtime+size，删/加一条后注入侧自然重读。
+          sendJson({ ...result, role, store });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory-diary/add') {
+          const body = await readBody();
+          const role = targetRole(body.role);
+          const text = String(body.text ?? '').trim();
+          if (!role) { sendJson({ ok: false, error: '缺少 role' }, 400); return; }
+          if (!text) { sendJson({ ok: false, error: '内容不能为空' }, 400); return; }
+          const store = body.store === 'diary' ? 'diary' : 'facts';
+          const conv = String(body.scope ?? body.conv ?? '').trim();
+          const result = store === 'diary'
+            ? appendDiary(MEMORY_DIARY_DIR, { role, text, kind: String(body.kind ?? 'event'), conv, imp: Number(body.imp) || 3, extra: { source: 'console' } })
+            : appendFact(MEMORY_DIARY_DIR, { role, text, cat: String(body.cat ?? 'identity'), conv, source: 'console' });
+          // 不用手动清缓存：读写都看文件 mtime+size，删/加一条后注入侧自然重读。
+          sendJson({ ...result, role, store });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/memory-diary/import') {
+          const body = await readBody();
+          const bundle = body.bundle ?? body;
+          const roles = bundle && typeof bundle.roles === 'object' && bundle.roles ? bundle.roles : null;
+          if (!roles) { sendJson({ ok: false, error: '导入文件格式不对：需要 { version:1, roles:{…} }' }, 400); return; }
+          const summary = {};
+          for (const [rawRole, data] of Object.entries(roles)) {
+            const role = sanitizeRoleName(rawRole);
+            if (!role || !data || typeof data !== 'object') continue;
+            let facts = 0;
+            let diary = 0;
+            for (const f of Array.isArray(data.facts) ? data.facts : []) {
+              const r = appendFact(MEMORY_DIARY_DIR, { role, text: f?.text, cat: f?.cat, conv: f?.conv, source: f?.source ?? 'import', at: f?.at });
+              if (r.ok && !r.skipped) facts += 1;
+            }
+            for (const d of Array.isArray(data.diary) ? data.diary : []) {
+              const r = appendDiary(MEMORY_DIARY_DIR, { role, text: d?.text, kind: d?.kind, conv: d?.conv, imp: d?.imp, at: d?.at, extra: d?.extra });
+              if (r.ok && !r.skipped) diary += 1;
+            }
+            summary[role] = { facts, diary };
+          }
+          log(`控制台：导入角色记忆 ${JSON.stringify(summary)}`);
+          sendJson({ ok: true, summary });
+          return;
+        }
+        // ── 交接单（P4） ────────────────────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/handoff') {
+          const role = targetRole(url.searchParams.get('role'));
+          const scope = String(url.searchParams.get('scope') ?? '').trim();
+          if (!role) { sendJson({ ok: false, error: '缺少 role' }, 400); return; }
+          const data = readHandoff(MEMORY_DIARY_DIR, role);
+          const key = memoryScope(scope);
+          const turnState = key ? getSocialV2State(key) : null;
+          sendJson({
+            ok: true,
+            role,
+            scope,
+            latest: data || null,
+            pending: data ? isHandoffPending(data, key) : false,
+            turns: Number(turnState?.handoffTurns?.n) || 0,
+            remindAfterTurns: handoffRemindTurns(),
+            autoAfterTurns: 0,
+            enabled: handoffEnabled(),
+            archive: fs.existsSync(path.join(MEMORY_DIARY_DIR, 'handoff', role))
+              ? fs.readdirSync(path.join(MEMORY_DIARY_DIR, 'handoff', role)).sort().reverse().slice(0, 20)
+              : [],
+          });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/handoff/rotate') {
+          const body = await readBody();
+          const key = memoryScope(String(body.scope ?? body.key ?? '').trim());
+          if (!key) { sendJson({ ok: false, error: '需要指定一个会话窗口（scope）' }, 400); return; }
+          const result = rotateSessionToNew(key);
+          if (result.ok) log(`控制台：生成交接单并换新会话 ${key}（${result.turns} 轮）`);
+          sendJson(result, result.ok ? 200 : 400);
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/handoff/use') {
+          const body = await readBody();
+          const role = targetRole(body.role);
+          if (!role) { sendJson({ ok: false, error: '缺少 role' }, 400); return; }
+          const result = markHandoffUsed(MEMORY_DIARY_DIR, role);
+          sendJson({ ok: true, role, ...result });
+          return;
+        }
+      }
+      if (req.method === 'GET' && url.pathname === '/api/sessions') {
           const list = [];
           for (const [key, sessionId] of Object.entries(state.sessions)) {
             list.push({ key, sessionId, owner: key === `private:${String(cfg.ownerQQ ?? '')}` });
@@ -6985,7 +7257,7 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_append' }, 403); return; }
           const st = getSocialV2State(key);
-          appendMemoryV2(st, category, content, extra);
+          appendMemoryV2(st, category, content, extra, key);
           sendJson({ ok: true, key, category, content, memory: formatMemoryV2(st) });
           return;
         }
@@ -9189,7 +9461,7 @@ async function main() {
     return lines.join('\n');
   }
 
-  function appendMemoryV2(st, category, content, extra = {}) {
+  function appendMemoryV2(st, category, content, extra = {}, key = '') {
     if (!st) return;
     const text = redactKnownTokensOnly(String(content ?? '')).trim();
     const cat = String(category || '').trim();
@@ -9255,6 +9527,9 @@ async function main() {
         }
       }
     }
+    // 同时落一条长期日记：轻量记忆 2 小时就过期，日记是压缩后还能找回的锚（P2）。
+    // 失败只记日志、不影响记忆写入本身。
+    diaryMirrorMemory(key, cat, text, extra);
     saveSocialV2State();
   }
 
@@ -9547,6 +9822,26 @@ async function main() {
     } else if (accepted.result.value.command?.text && opts.silent && opts.farewell) {
       social.exitingSessions.delete(sessionId);
     }
+    // 交接单投递成功后才作废：确认它真的进了新会话的上下文，而不是生成完就丢。
+    const pendingHandoffRole = handoffInjected.get(key);
+    if (pendingHandoffRole) {
+      handoffInjected.delete(key);
+      try {
+        markHandoffUsed(MEMORY_DIARY_DIR, pendingHandoffRole);
+      } catch (err) {
+        log(`交接单标记已用失败：${err?.message ?? err}`);
+      }
+    }
+    if (opts.wakeReason) {
+      try {
+        const turnState = getSocialV2State(key);
+        if (turnState) {
+          const n = Number(turnState.handoffTurns?.n) || 0;
+          turnState.handoffTurns = { n: n + 1, startedAt: turnState.handoffTurns?.startedAt || Date.now() };
+          saveSocialV2State();
+        }
+      } catch { /* 轮数只用于自动交接，失败不影响投递 */ }
+    }
     return { ok: true };
   }
 
@@ -9823,6 +10118,405 @@ async function main() {
   }
   function currentRoleHint() {
     return roleHintForMode('v1');
+  }
+
+  // 角色记忆 P1：人格内核（qqbridge-tool/memory-diary/persona-core/<角色>.md）。
+  // 为什么需要它：完整角色卡只在首唤醒时靠 qq_get_prompt 拉一次，之后活在 DSH 会话上下文里；
+  // 上下文一压缩，最快被挤掉的正是这份一次性内容，模型只剩工具协议 → 性格漂移。
+  // 内核 ≤600 字、每轮注入，是压缩也删不掉的锚。文件 `draft: true` 时不注入。
+  // 缓存 key 带 mtime+size，理由与 roleRawContent 相同（秒级 mtime、同名重写都要能击穿）。
+  const MEMORY_DIARY_DIR = path.join(ROOT, 'qqbridge-tool', 'memory-diary');
+  let personaCoreCache = { key: '', value: '' };
+  function personaCoreLine() {
+    try {
+      const rs = readRoleState();
+      if (!rs.role) return '';
+      const safeName = sanitizeRoleName(rs.role);
+      if (!safeName || safeName.includes('..')) return '';
+      const file = path.join(MEMORY_DIARY_DIR, 'persona-core', `${safeName}.md`);
+      const resolved = path.resolve(file);
+      if (!resolved.startsWith(path.resolve(MEMORY_DIARY_DIR) + path.sep)) return '';
+      if (!fs.existsSync(resolved)) return '';
+      const stat = fs.statSync(resolved);
+      const cacheKey = `${safeName}:${stat.mtimeMs}:${stat.size}`;
+      if (personaCoreCache.key === cacheKey) return personaCoreCache.value;
+      // 预算由每个角色自己的 front matter `budgetChars` 决定（缺省 600），多个人格互不影响。
+      const core = loadPersonaCore(fs.readFileSync(resolved, 'utf8'));
+      // 草稿态：文件在但不注入；日志说清楚，免得"怎么没生效"来回猜。
+      if (core.draft || !core.block) {
+        log(`人格内核未启用（草稿或缺正文）：${safeName} v${core.version || '?'}`);
+        personaCoreCache = { key: cacheKey, value: '' };
+        return '';
+      }
+      if (core.truncated) log(`人格内核超预算已截断：${safeName} ${core.chars}字 / 上限 ${core.budget}`);
+      log(`人格内核已装载：${safeName} v${core.version || '?'} ${core.chars}字 预算${core.budget} hash=${core.hash}`);
+      personaCoreCache = { key: cacheKey, value: core.block };
+      return core.block;
+    } catch (err) {
+      log(`人格内核读取失败，已跳过：${err?.message ?? err}`);
+      return '';
+    }
+  }
+
+  // ── 人格内核的自动生成 / 一键更新 ──────────────────────────────
+  // 新建人格时自动出一份草稿（只摘角色卡原文，不编造）；角色卡改过之后，
+  // 控制台可以点「更新人格内核」按新卡重生成，旧版先备份到 persona-core/.bak/。
+  function personaCoreFile(safeName) {
+    return path.join(MEMORY_DIARY_DIR, 'persona-core', `${safeName}.md`);
+  }
+
+  function personaCoreBackupDir() {
+    return path.join(MEMORY_DIARY_DIR, 'persona-core', '.bak');
+  }
+
+  function readCoreMeta(safeName) {
+    const file = personaCoreFile(safeName);
+    try {
+      if (!fs.existsSync(file)) return { exists: false };
+      const text = fs.readFileSync(file, 'utf8');
+      const core = loadPersonaCore(text);
+      const sourceHash = /^sourceHash:\s*(\S+)/m.exec(text)?.[1] ?? '';
+      const generated = /^generated:\s*true\b/m.test(text);
+      let cardHash = '';
+      try { cardHash = roleCardHash(fs.readFileSync(roleFilePath(safeName), 'utf8')); } catch { /* 角色卡没了就只报存在 */ }
+      return {
+        exists: true,
+        draft: core.draft,
+        hash: core.hash,
+        chars: core.chars,
+        version: core.version,
+        generated,
+        sourceHash,
+        cardHash,
+        // 只是提示：内核按旧角色卡生成的，不代表不能用。
+        stale: Boolean(generated && cardHash && sourceHash && sourceHash !== '-' && sourceHash !== cardHash),
+        body: core.body,
+      };
+    } catch (err) {
+      return { exists: fs.existsSync(file), error: String(err?.message ?? err) };
+    }
+  }
+
+  function writeCoreForRole(safeName, { backup = true } = {}) {
+    const card = fs.readFileSync(roleFilePath(safeName), 'utf8');
+    const drafted = draftCoreFile(card, { roleName: safeName });
+    const file = personaCoreFile(safeName);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    let backupPath = '';
+    if (backup && fs.existsSync(file)) {
+      fs.mkdirSync(personaCoreBackupDir(), { recursive: true });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      backupPath = path.join(personaCoreBackupDir(), `${safeName}-${stamp}.md`);
+      fs.copyFileSync(file, backupPath);
+    }
+    fs.writeFileSync(file, drafted.text, 'utf8');
+    personaCoreCache = { key: '', value: '' }; // 下一轮立即生效
+    return { chars: drafted.body.length, warnings: drafted.warnings, backupPath };
+  }
+
+  // 角色记忆 P2：事件日记（qqbridge-tool/memory-diary/state/<角色>/diary.jsonl）。
+  // 分工：轻量记忆（上文的 topics/thoughts/impressions）是 2 小时就过期的短期状态；
+  // 日记不过期，负责"我们之间发生过什么、答应过什么"，上下文压缩后靠它找回来。
+  const MEMORY_KIND = { activeTopic: 'topic', pendingThought: 'thought', memberImpression: 'impression' };
+  // 日记会被每次唤醒读取，加一层 mtime+size 缓存（与本文件其他内容缓存同一策略）。
+  let diaryCache = { key: '', list: [] };
+
+  // 会话维度：同一人格在不同会话窗口（`private:<QQ>` / `group:<群号>`）各记各的，
+  // 免得在 A 窗口知道的事跑到 B 窗口里说出来。记录里本来就有 conv 字段，按它过滤即可。
+  function memoryScope(key) {
+    const s = String(key ?? '').trim();
+    return /^(?:private|group):\d+$/.test(s) ? s : '';
+  }
+
+  function inScope(entry, scope) {
+    const conv = String(entry?.conv ?? '');
+    // 没写会话的条目（旧数据 / 手动导入的通用条目）对每个窗口都可见；
+    // 写了会话的条目只在自己的窗口里出现。
+    return !conv || conv === String(scope ?? '');
+  }
+
+  function diaryEntries(role) {
+    let stat;
+    try {
+      stat = fs.statSync(path.join(MEMORY_DIARY_DIR, 'state', role, 'diary.jsonl'));
+    } catch {
+      return [];
+    }
+    const key = `${role}:${stat.mtimeMs}:${stat.size}`;
+    if (diaryCache.key === key) return diaryCache.list;
+    const list = readDiary(MEMORY_DIARY_DIR, role);
+    diaryCache = { key, list };
+    return list;
+  }
+
+  function diaryEnabled() {
+    return cfg?.diary?.enabled !== false;
+  }
+
+  function diaryRole() {
+    const rs = readRoleState();
+    return rs.role ? sanitizeRoleName(rs.role) : '';
+  }
+
+  // 记忆写入时顺手落一条日记：AI 本来就会调 qq_memory_append，这里不额外花一轮对话。
+  function diaryMirrorMemory(key, category, text, extra) {
+    if (!diaryEnabled()) return;
+    const role = diaryRole();
+    if (!role || !text) return;
+    try {
+      const extraSafe = category === 'memberImpression' && extra?.target ? { target: String(extra.target).slice(0, 40) } : {};
+      appendDiary(MEMORY_DIARY_DIR, {
+        role,
+        conv: key || '',
+        kind: MEMORY_KIND[category] || 'event',
+        text,
+        imp: category === 'activeTopic' ? 3 : 2,
+        extra: extraSafe,
+      });
+      diaryCache = { key: '', list: [] };
+    } catch (err) {
+      log(`日记写入失败，已跳过：${err?.message ?? err}`);
+    }
+  }
+
+  // 取「最近 N 条 + 和当前话题相关几条」，按预算拼成注入块。读不到就返回空串，绝不阻塞唤醒。
+  function diaryLines(key) {
+    if (!diaryEnabled()) return '';
+    const role = diaryRole();
+    if (!role) return '';
+    const budgetChars = Number(cfg?.diary?.maxInjectChars) || DEFAULT_INJECT_CHARS;
+    const maxEntries = Math.max(1, Number(cfg?.diary?.maxEntries) || 6);
+    try {
+      const scope = memoryScope(key);
+      const all = diaryEntries(role).filter((e) => inScope(e, scope));
+      if (!all.length) return '';
+      const recent = all.slice(-maxEntries);
+      const st = getSocialV2State(key);
+      const query = (Array.isArray(st?.activeTopics) ? st.activeTopics : [])
+        .map((t) => String(t?.text ?? ''))
+        .filter(Boolean)
+        .join(' ');
+      const related = query ? searchDiary(all, query, { limit: 3 }) : [];
+      const { block, used } = buildDiaryBlock({ recent, related, budgetChars });
+      if (used > 0 && used !== recent.length) log(`日记注入 ${used} 条（最近 ${recent.length} + 相关 ${related.length}，去重后 ${used}）`);
+      return block;
+    } catch (err) {
+      log(`日记读取失败，已跳过：${err?.message ?? err}`);
+      return '';
+    }
+  }
+
+  // ── 角色记忆 P3：长期事实（facts.jsonl） ────────────────────────
+  // 分工再往下切一层：日记记「发生过什么」，事实记「对方是谁」。
+  // 事实条目少、稳定、优先级高（身份/雷点），所以单独一组、单独预算。
+  let factsCache = { key: '', list: [] };
+
+  function factsRole() {
+    const rs = readRoleState();
+    return rs.role ? sanitizeRoleName(rs.role) : '';
+  }
+
+  function factsEnabled() {
+    return cfg?.facts?.enabled !== false;
+  }
+
+  function factsFor(role) {
+    if (!role) return [];
+    let stat;
+    try {
+      stat = fs.statSync(path.join(MEMORY_DIARY_DIR, 'state', role, 'facts.jsonl'));
+    } catch {
+      return [];
+    }
+    const cacheKey = `${role}:${stat.mtimeMs}:${stat.size}`;
+    if (factsCache.key === cacheKey) return factsCache.list;
+    const list = readFacts(MEMORY_DIARY_DIR, role);
+    factsCache = { key: cacheKey, list };
+    return list;
+  }
+
+  function factsLines(key) {
+    if (!factsEnabled()) return '';
+    const role = factsRole();
+    if (!role) return '';
+    try {
+      const scope = memoryScope(key);
+      const all = factsFor(role).filter((e) => inScope(e, scope));
+      if (!all.length) return '';
+      const want = Math.max(1, Number(cfg?.facts?.maxEntries) || 6);
+      // 相关度用「当前话题 + 最近几条消息」去配；命中不了就退化成按权重取。
+      const st = getSocialV2State(key);
+      const query = [
+        ...(Array.isArray(st?.activeTopics) ? st.activeTopics.map((t) => String(t?.text ?? '')) : []),
+        ...(Array.isArray(st?.recentMessages) ? st.recentMessages.slice(-6).map((m) => String(m?.plain ?? m?.text ?? '')) : []),
+      ].filter(Boolean).join(' ');
+      const related = query ? searchFacts(all, query, { limit: 3 }) : [];
+      const { block, used } = buildFactsBlock({
+        facts: all.slice(-want),
+        related,
+        budgetChars: Number(cfg?.facts?.maxInjectChars) || DEFAULT_FACTS_INJECT_CHARS,
+      });
+      if (used > 0) log(`长期事实注入 ${used} 条（共 ${all.length} 条）`);
+      return block;
+    } catch (err) {
+      log(`长期事实读取失败，已跳过：${err?.message ?? err}`);
+      return '';
+    }
+  }
+
+  // 从**别人发来的**文字里保守提炼画像；失败只记日志，绝不影响收消息。
+  function captureFactsFromMessage(key, textContent) {
+    if (!factsEnabled()) return;
+    const role = factsRole();
+    if (!role) return;
+    const plain = String(textContent ?? '').trim();
+    if (!plain) return;
+    try {
+      const candidates = extractFacts(plain);
+      let added = 0;
+      for (const c of candidates) {
+        const r = appendFact(MEMORY_DIARY_DIR, { role, text: c.text, cat: c.cat, conv: key || '', source: 'auto' });
+        if (r.ok && !r.skipped) added += 1;
+      }
+      if (added) factsCache = { key: '', list: [] };
+    } catch (err) {
+      log(`长期事实提炼失败：${err?.message ?? err}`);
+    }
+  }
+
+  // ── 角色记忆 P4：交接单（换会话时把这一个窗口的记忆带过去） ──────
+  // 上下文到顶不是终点：先把这一窗的事实/日记/话题/印象写成交接单，再退掉旧会话。
+  // 新会话第一次唤醒时把交接单塞进提示词，投递成功后标记已用，只读一次。
+  const handoffInjected = new Map(); // key -> role，等投递成功后再标记已用
+
+  function handoffEnabled() {
+    return cfg?.handoff?.enabled !== false;
+  }
+
+  function handoffDataFor(key) {
+    const rs = readRoleState();
+    if (!rs.role) return null;
+    const role = sanitizeRoleName(rs.role);
+    const scope = memoryScope(key);
+    let facts = [];
+    let diary = [];
+    try {
+      facts = factsFor(role).filter((e) => inScope(e, scope));
+    } catch { /* 读不到就当没有 */ }
+    try {
+      diary = readDiary(MEMORY_DIARY_DIR, role).filter((e) => inScope(e, scope));
+    } catch { /* 同上 */ }
+    const st = getSocialV2State(key) || {};
+    return buildHandoff({
+      role: rs.role,
+      scope,
+      facts,
+      diary,
+      memory: { topics: st.activeTopics, thoughts: st.pendingThoughts },
+      stats: {
+        turns: Number(st.handoffTurns?.n) || 0,
+        messages: Array.isArray(st.recentMessages) ? st.recentMessages.length : 0,
+      },
+    });
+  }
+
+  function handoffLines(key) {
+    if (!handoffEnabled()) return '';
+    try {
+      const rs = readRoleState();
+      if (!rs.role) return '';
+      const role = sanitizeRoleName(rs.role);
+      const scope = memoryScope(key);
+      const data = readHandoff(MEMORY_DIARY_DIR, role);
+      if (!isHandoffPending(data, scope)) return '';
+      const budgetChars = Number(cfg?.handoff?.maxInjectChars) || HANDOFF_BLOCK_MAX_CHARS;
+      const { block, chars } = handoffBlock(data, { budgetChars });
+      if (!block) return '';
+      handoffInjected.set(key, role);
+      log(`交接单已注入：${role} ${scope || '(无会话)'} 共 ${chars} 字（这一轮读完后作废）`);
+      return block;
+    } catch (err) {
+      log(`交接单读取失败，已跳过：${err?.message ?? err}`);
+      return '';
+    }
+  }
+
+  // 换会话：写交接单 → 退掉旧会话（下次唤醒自动新建）→ 轮数清零。
+  // 只有人（控制台/接口）能触发；桥接自己绝不自动调这个函数。
+  function rotateSessionToNew(key) {
+    if (!handoffEnabled()) return { ok: false, error: '交接功能已关闭（handoff.enabled=false）' };
+    if (!state.sessions[key]) {
+      // 没有活跃会话时也允许预先生成交接单，方便换机器/换桥接后开局。
+      const data = handoffDataFor(key);
+      if (!data) return { ok: false, error: '当前没有启用的人格' };
+      const out = writeHandoff(MEMORY_DIARY_DIR, data);
+      return { ok: true, role: data.role, scope: data.scope, turns: data.stats.turns, retired: false, planned: true, file: path.relative(ROOT, out.file) };
+    }
+    const data = handoffDataFor(key);
+    if (!data) return { ok: false, error: '当前没有启用的人格' };
+    const out = writeHandoff(MEMORY_DIARY_DIR, data);
+    const st = getSocialV2State(key);
+    if (st) {
+      st.handoffTurns = { n: 0, startedAt: Date.now() };
+      saveSocialV2State();
+    }
+    retireSession(key);
+    log(`交接单已生成：${data.role} ${data.scope || '(无会话)'} ${data.stats.turns} 轮 → ${path.relative(ROOT, out.file)}；旧会话已退掉，下次唤醒进新会话`);
+    return {
+      ok: true,
+      role: data.role,
+      scope: data.scope,
+      turns: data.stats.turns,
+      retired: true,
+      file: path.relative(ROOT, out.file),
+      markdown: path.relative(ROOT, out.markdown),
+    };
+  }
+
+  // ── 上下文将满的「提醒」：只发消息，不动会话 ──────────────────────
+  function handoffRemindTurns() {
+    // 老配置里写 autoAfterTurns 的，按提醒阈值理解（绝不再自动换会话）。
+    const raw = cfg?.handoff?.remindAfterTurns ?? cfg?.handoff?.autoAfterTurns;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+
+  async function notifyOwnerText(text) {
+    const owner = String(cfg.ownerQQ ?? '').trim();
+    if (!owner) {
+      log('未配置 ownerQQ，这条提醒只留在日志/控制台');
+      return false;
+    }
+    try {
+      await sendToQQ(`private:${owner}`, text);
+      return true;
+    } catch (err) {
+      log(`提醒发送失败：${err?.message ?? err}`);
+      return false;
+    }
+  }
+
+  // 每个窗口跨过阈值提醒一次；到 2 倍、3 倍阈值再提醒一次，避免刷屏。
+  function maybeRemindHandoff(key) {
+    if (!handoffEnabled()) return;
+    const threshold = handoffRemindTurns();
+    if (!threshold) return;
+    const st = getSocialV2State(key);
+    if (!st) return;
+    const turns = Number(st.handoffTurns?.n) || 0;
+    if (turns < threshold) return;
+    const remindedFor = Number(st.handoffTurns?.remindedFor) || 0;
+    if (remindedFor && turns < remindedFor + threshold) return;
+    st.handoffTurns = { ...(st.handoffTurns ?? {}), n: turns, remindedFor: turns, remindedAt: Date.now() };
+    saveSocialV2State();
+    const role = readRoleState().role || '当前人格';
+    log(`上下文提醒：${key} 已聊 ${turns} 轮（阈值 ${threshold}），已通知 ${cfg.ownerQQ ? '管理员' : '日志'}`);
+    if (cfg?.handoff?.notifyQQ === false) return;
+    notifyOwnerText([
+      '【系统提醒 · 不是角色发言】',
+      `${role} 这个会话窗口已经聊了 ${turns} 轮，上下文接近上限。`,
+      '到控制台「人格日记 → 换会话 · 交接单」点「生成交接单并换新会话」就能接过去；不点也可以继续聊，但再往后可能会开始丢前面的细节。',
+    ].join('\n')).catch(() => {});
   }
 
   // 二代仿真模式专用角色提示：去掉一代的 [SILENT] / 空格分句等状态机指令，避免与工具协议冲突。
@@ -10651,11 +11345,18 @@ async function main() {
   function buildWakePromptV2(key, reason) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    // 人格内核紧随角色名：压缩后这块必须还在（draft / 缺文件时为空串，不影响其他段落）。
+    const coreLine = personaCoreLine();
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
+    // 长期日记：最近几条 + 与当前话题相关的旧事，上下文压缩后靠它接住「发生过什么」。
+    const diaryLine = diaryLines(key);
+    const factsLine = factsLines(key);
+    // 交接单只在「刚换过会话」的第一次唤醒注入：读一次就作废，避免每轮重复占预算。
+    const handoffLine = handoffLines(key);
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -10701,7 +11402,7 @@ async function main() {
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
     // 时间感放在 base 的最末尾：紧接着就是【唤醒】原因与行动指令，位置最显眼。
     const timeSenseLine = buildTimeSenseLine(st);
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine + timeSenseLine;
+    const base = roleLine + coreLine + handoffLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + diaryLine + factsLine +  participationLine + preSleepLine + timeSenseLine;
     // 唤醒原因里的那条消息本身多旧：`atMention@seq194` 这种形态能反查到原消息。
     const triggeredSeq = wakeReasonSeq(reason);
     const triggeredMsg = triggeredSeq ? findV2MessageBySeq(st, triggeredSeq) : null;
@@ -10728,11 +11429,12 @@ async function main() {
   function buildWakeReminderPromptV2(key) {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
+    const coreLine = personaCoreLine();
     const identityLine = selfIdentityTextV2();
     const st = getSocialV2State(key);
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
-    return `${roleLine}${identityLine}${tokenLine}【提醒】你还没有完成回合收尾。请调用 qq_set_wake_config 设置下一次唤醒条件（例如继续潜水多久、@/名字/关键词/提问/概率/指定成员等），或者调用 qq_mark_read 表示你看过且决定不接。这是为了防止你忘记收尾后进入“永眠”。注意：设置潜水前先用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察；等待期间有人说话时查看 newMessages，判断不需要你参与即可收尾。`;
+    return `${roleLine}${coreLine}${identityLine}${tokenLine}【提醒】你还没有完成回合收尾。请调用 qq_set_wake_config 设置下一次唤醒条件（例如继续潜水多久、@/名字/关键词/提问/概率/指定成员等），或者调用 qq_mark_read 表示你看过且决定不接。这是为了防止你忘记收尾后进入“永眠”。注意：设置潜水前先用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成沉睡前观察；等待期间有人说话时查看 newMessages，判断不需要你参与即可收尾。`;
   }
 
   async function sendWakePromptV2(key, reason) {
@@ -10816,6 +11518,12 @@ async function main() {
     st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
     st.lastWakeReason = reason;
     saveSocialV2State();
+    // 上下文将满只提醒、绝不自动换会话：换不换、什么时候换，由人决定。
+    try {
+      maybeRemindHandoff(key);
+    } catch (err) {
+      log(`交接提醒失败，不影响本次唤醒：${err?.message ?? err}`);
+    }
     const promptText = buildWakePromptV2(key, reason);
     log(`[reserved2] 唤醒 ${key}（${reason}）`);
     const rollbackWakeTime = () => {
@@ -11338,6 +12046,7 @@ async function main() {
       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
+      captureFactsFromMessage(key, plainContent);
       if (socialV2.paused) {
         appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
         return;

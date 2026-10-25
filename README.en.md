@@ -39,6 +39,25 @@ QQ messages ──► SnowLuma (OneBot v11 WS) ──► qq-bridge ──► DSH
 - Slang/network-expression learning with human confirmation.
 - Lightweight memory system for active topics, pending thoughts and member impressions.
 - Sticker library integration with AI-friendly sticker usage.
+- Long-term persona memory (optional component): persona core, long-term facts, event diary and a session handoff sheet, all in plain files — see [Persona memory](#persona-memory-optional-component).
+
+## Persona memory (optional component)
+
+The bridge only relays messages; **long-term memory** lives in a separate tool, [`persona-memory-diary`](https://github.com/firedkitten/persona-memory-diary), checked out at `qqbridge-tool/memory-diary/`.
+
+```
+persona core   who she is, how she talks, what she never does   → injected every turn, <=600 chars
+long facts     who you are, likes, lines not to cross           → every turn, <=300 chars / 6 items
+event diary    what happened, what was promised                 → every turn, recent + relevant, <=400 chars
+handoff sheet  where the last session left off                  → read once in a new session, <=700 chars
+```
+
+- Survives truncation and repeated compaction: budgets are fixed, so tone and agreements do not decay as the chat grows.
+- Per-window isolation: different conversation windows of the same persona keep separate memories.
+- No silent session switching: when context is nearly full the bridge only reminds you (`handoff.remindAfterTurns`, default 40 turns); you rotate manually and the handoff sheet is read once.
+- Console page "Persona diary": view / add / delete per persona and per window, JSON export and import.
+
+It is its own repository; clone it into `qqbridge-tool/memory-diary/` before the first start (`src/bridge.js` imports it with a static path and fails to boot without it). Data lives in `qqbridge-tool/memory-diary/{persona-core,state}/` and is never committed.
 
 ## Requirements
 

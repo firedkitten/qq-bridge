@@ -5,6 +5,49 @@
 
 ---
 
+## v0.1.2 — 2026-10-25
+
+上游基线不变（`v0.2.1-r1`）。这一版加入**人格记忆**：一个独立的四层记忆工具，以及它在桥接里的接线。
+
+### 新增
+
+**人格记忆工具 `qqbridge-tool/memory-diary/`**（独立仓库：[firedkitten/persona-memory-diary](https://github.com/firedkitten/persona-memory-diary)）
+
+- 四层纯文件记忆：人格内核（每轮注入，≤600 字）、长期事实（每轮注入，≤300 字 / 6 条）、事件日记（最近 + 相关，≤400 字）、交接单（新会话只读一次，≤700 字）。JSONL / Markdown / JSON，无数据库、无向量库、不调用模型。
+- **人格内核**：一个角色一个文件 `persona-core/<角色>.md`，`draft: true` 一行即可停用；`personaHash` 每轮可对账；从角色卡半自动生成草稿（只摘录原文，不编造），覆盖前自动备份旧版。
+- **长期事实**：用句式规则从对方消息里抽取（名字 / 年龄 / 城市 / 偏好 / 雷点 / 关系 / 计划），上限 200 条，10 分钟去重窗口；注入时按「身份 > 雷点 > 喜好 > 关系 > 计划」排序。
+- **事件日记**：JSONL 落盘，按会话窗口隔离，1 MB 轮转保留最新 3000 行，中文二元组检索。
+- **交接单**：换会话前生成，注入时只读一次（投递成功才标记已读），同时原样归档成 Markdown。
+- **只提醒、不自动换会话**：累计唤醒轮数达到 `handoff.remindAfterTurns`（默认 40）时，下一次唤醒前发一条管理员提醒，之后每 +40 轮补一条。没有任何自动切换路径。
+
+**控制台「人格日记」页**
+
+- 按人格、按会话窗口查看 / 补记 / 删除长期事实与事件日记，支持 JSON 导出与导入（导出即一份可迁移档案）。
+- 人格编辑器新增「更新人格内核」「查看内核」；新建人格时自动生成内核草稿，角色卡改动后会提示内核已过期。
+
+**其它**
+
+- 新增单测：`scripts/test-memory-diary.mjs`、`test-handoff.mjs`、`test-persona-core.mjs`、`test-persona-draft.mjs`。
+- 角色卡改名时同步重命名内核文件；删除角色不删记忆。
+
+### 安装注意
+
+本仓库不含 `qqbridge-tool/memory-diary/`（它是独立仓库，且其中 `persona-core/` 与 `state/` 属于用户数据）。克隆后补一步：
+
+```bash
+git clone https://github.com/firedkitten/persona-memory-diary.git qqbridge-tool/memory-diary
+```
+
+`src/bridge.js` 顶部是静态 import，缺目录会在启动时报 `ERR_MODULE_NOT_FOUND`。
+
+### 文档
+
+- `README.md` / `README.en.md`：新增「人格记忆」一节与安装步骤。
+- `docs/FOLDER_MAP.md`：顶层布局补 `qqbridge-tool/memory-diary/`。
+- `docs/guides/PERSONA_MEMORY.md`：补「四层长期记忆」与插件边界说明。
+
+---
+
 ## v0.1.1 — 2026-10-24
 
 上游基线不变（`v0.2.1-r1`）。这一版是**修 Bug**，没有新的运行时功能。

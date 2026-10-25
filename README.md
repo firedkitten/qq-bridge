@@ -10,7 +10,7 @@
 >
 > 🍴 本仓库是 **[Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge)** 的 fork，衍生改动的完整清单（人格记忆与会话隔离、云端部署套件、管理面板等）见 **[NOTICE.md](NOTICE.md)** 与 **[CHANGELOG.md](CHANGELOG.md)**。
 >
-> 📦 本 fork 的版本号自 **`v0.1.0`** 起另行计算，当前 **`v0.1.1`**（功能基线为上游 `v0.2.1-r1`，下面的适配说明仍针对该基线）。
+> 📦 本 fork 的版本号自 **`v0.1.0`** 起另行计算，当前 **`v0.1.2`**（功能基线为上游 `v0.2.1-r1`，下面的适配说明仍针对该基线）。
 
 把 QQ 消息接入 DSH agent：QQ 好友/群发来的消息会变成 DSH 会话里的用户消息，agent 的回复（含提问、工具审批）会发回 QQ。
 
@@ -101,6 +101,24 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
   - 一代仿真模式（`reserved`）下，AI 可以只输出 `[SILENT]` 表示“潜水/不接话”，桥接会静默不发送
   - 一代仿真模式（`reserved`）按空格分句：AI 用空格表示拆成多条消息；中英文/数字之间的空格也会被当成分条信号，不想分条就不要加空格（`reserved2` 不适用，分条请用 `qq_send_message` 数组）
 
+## 人格记忆（可选组件）
+
+桥接负责「把消息交给 Agent」，**长期记忆**由独立工具 [`persona-memory-diary`](https://github.com/firedkitten/persona-memory-diary) 提供，代码放在 `qqbridge-tool/memory-diary/`：
+
+```
+人格内核  她是谁、怎么说话、不能做什么      → 每轮注入，≤600 字
+长期事实  对方是谁、喜欢什么、雷点在哪      → 每轮注入，≤300 字 / 6 条
+事件日记  发生过什么、答应过什么            → 每轮注入，最近 + 相关，≤400 字
+交接单    上一个会话聊到哪了                → 新会话只读一次，≤700 字
+```
+
+- **防压缩漂移**：上下文被截断、被多次压缩时，人设与约定不跟着一起磨损——预算固定，聊多久都不会更贵。
+- **按会话窗口隔离**：同一个角色的不同窗口各记各的，A 窗口知道的事不会漏到 B 窗口。
+- **换会话不失忆**：上下文将满时只提醒、不自动换，由你手动换新会话；交接单在新会话里只读一次（`handoff.remindAfterTurns`，默认 40 轮）。
+- **控制台「人格日记」页**：按角色、按窗口查看/补记/删除，JSON 导出导入，导出即一份可迁移档案。
+
+它是独立仓库，克隆后放进 `qqbridge-tool/memory-diary/` 即可（桥接用相对路径引用）。记忆数据落在 `qqbridge-tool/memory-diary/{persona-core,state}/`，均不入库。
+
 ## 前置条件
 
 1. 运行中的 DeepSeek Harness Web（默认 `http://127.0.0.1:3080`）
@@ -112,6 +130,14 @@ QQ 消息 ──► SnowLuma（OneBot v11 WS）──► 本桥接进程 ──�
 ```bash
 npm install        # 安装依赖（postinstall 会自动修补 @snowluma/sdk 的 ESM 打包 bug）
 ```
+
+> 🧩 **人格记忆工具要单独取出来**：`src/bridge.js` 用相对路径 `../qqbridge-tool/memory-diary/src/` 静态引用它，缺目录会在启动时报 `ERR_MODULE_NOT_FOUND`。克隆本仓库后补一步：
+>
+> ```bash
+> git clone https://github.com/firedkitten/persona-memory-diary.git qqbridge-tool/memory-diary
+> ```
+>
+> 不需要这套记忆时，删掉 `src/bridge.js` 顶部对应的 import 与调用点即可（见 `docs/guides/PERSONA_MEMORY.md`）。
 
 复制 `config.example.json` 为 `config.json` 后编辑：
 
@@ -276,6 +302,8 @@ qq-bridge/
   audio/                # 语音库：把准备好的音频放这里，可作 QQ 语音发出（用法见 docs/README.md 文档索引）
   dsh/agent-presets/    # qq-chat / qq-chat-v2 的 DSH agent preset 模板
   plugins/qq-mode-console  # DSH 插件：注册 qq-mode 设置命名空间（仅 host 半，UI 卡片未实现）
+  qqbridge-tool/
+    memory-diary/       # 人格记忆工具（独立仓库，克隆后放这里；见「人格记忆」一节）
   src/
     bridge.js           # 主程序
     dsh-client.js       # Node 版 DSH API 客户端（WS 下行）

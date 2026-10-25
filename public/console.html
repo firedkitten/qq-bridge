@@ -1768,7 +1768,8 @@ button:active:not(:disabled) {
       <button data-view="sessions" class="nav-item"><span class="nav-icon" aria-hidden="true">☷</span>会话与审批<span class="nav-count" id="pendingCount">—</span></button>
       <button data-view="persona" class="nav-item"><span class="nav-icon" aria-hidden="true">◉</span>人格与角色</button>
       <div class="nav-label">聊天行为</div>
-      <button data-view="social-v2" class="nav-item"><span class="nav-icon" aria-hidden="true">◈</span>二代仿真<span class="nav-note">V2</span></button>
+      <button data-view="memory-diary" class="nav-item"><span class="nav-icon" aria-hidden="true">▣</span>人格日记</button>
+          <button data-view="social-v2" class="nav-item"><span class="nav-icon" aria-hidden="true">◈</span>二代仿真<span class="nav-note">V2</span></button>
       <button data-view="social-v1" class="nav-item"><span class="nav-icon" aria-hidden="true">◇</span>一代仿真<span class="nav-note">V1</span></button>
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
       <div class="nav-label">管理</div>
@@ -1860,6 +1861,11 @@ button:active:not(:disabled) {
             <button id="roleFormReset">清空表单</button>
             <span class="meta" id="roleCreateMsg"></span>
           </div>
+          <div class="row" style="margin-top:6px">
+            <button id="roleCoreUpdate" class="small">更新人格内核</button>
+            <button id="roleCorePreview" class="small">查看内核</button>
+            <span class="meta" id="roleCoreStatus">人格内核：选中人格后显示</span>
+          </div>
           <div class="meta err" id="roleEditorWarnings"></div>
         </div>
       </details>
@@ -1895,6 +1901,65 @@ button:active:not(:disabled) {
         <span class="meta" id="simPromptMsg"></span>
       </div>
       <div class="meta" id="simPromptRestart"></div>
+    </section>
+    <section id="section-memory-diary" data-page="memory-diary" class="card span-all">
+      <h2>人格日记</h2>
+      <div class="meta">压缩会带走对话，带不走记忆。<b>内核</b>管她是什么人（按人格每轮注入）、<b>事实</b>管对方是谁、<b>日记</b>管发生过什么。下面的数据都是本地 JSONL，导出就是一份可迁移的档案。<br>事实和日记按会话窗口分开记：一个窗口里知道的事，不会带到另一个窗口。</div>
+
+      <div class="row">
+        <label>人格 <select id="mdRole"></select></label>
+        <label>会话 <select id="mdScope"></select></label>
+        <button id="mdRefresh" class="small">刷新</button>
+        <button id="mdExport" class="small">导出 JSON</button>
+        <button id="mdImportPick" class="small">导入 JSON</button>
+        <input type="file" id="mdImportFile" accept=".json,application/json" hidden>
+        <span class="meta" id="mdStats">—</span>
+      </div>
+
+      <details class="settings-group" open>
+        <summary>长期事实 · 对方是谁（<span id="mdFactCount">0</span> 条）</summary>
+        <div class="row">
+          <input type="text" id="mdFactText" placeholder="手动补一条，如：对方不吃辣" style="flex:1;min-width:220px">
+          <select id="mdFactCat" style="width:120px">
+            <option value="identity">身份</option>
+            <option value="preference">喜好</option>
+            <option value="dislike">雷点</option>
+            <option value="relation">关系</option>
+            <option value="plan">计划</option>
+          </select>
+          <button id="mdFactAdd" class="small">添加</button>
+        </div>
+        <div class="slang-scroll" id="mdFactList">加载中…</div>
+      </details>
+
+      <details class="settings-group">
+        <summary>事件日记 · 发生过什么（<span id="mdDiaryCount">0</span> 条）</summary>
+        <div class="row">
+          <input type="text" id="mdDiaryText" placeholder="手动补一条，如：一起给猫起名" style="flex:1;min-width:220px">
+          <select id="mdDiaryKind" style="width:130px">
+            <option value="event">事件</option>
+            <option value="topic">话题</option>
+            <option value="thought">念头</option>
+            <option value="impression">印象</option>
+            <option value="handoff">交接</option>
+          </select>
+          <button id="mdDiaryAdd" class="small">添加</button>
+        </div>
+        <div class="slang-scroll" id="mdDiaryList">加载中…</div>
+      </details>
+
+      <details class="settings-group">
+        <summary>换会话 · 交接单（<span id="mdHandoffState">—</span>）</summary>
+        <div class="meta">上下文快满时不用硬撑：点一下就把这个窗口的事实、日记、话题和印象写成一张交接单，然后退掉旧会话。下次唤醒是新会话，但开头就把交接单读一遍，说得出之前发生过什么。<br>到设定轮数只会给你发一条提醒，<b>不会自动换会话</b>——换不换、什么时候换都由你决定。</div>
+        <div class="row">
+          <button id="mdHandoffMake" class="small">生成交接单并换新会话</button>
+          <button id="mdHandoffView" class="small">查看交接单</button>
+          <span class="meta" id="mdHandoffInfo">—</span>
+        </div>
+        <div class="meta" id="mdHandoffWarn" style="display:none;color:#d9534f"></div>
+      </details>
+
+      <p class="meta">提示：事实和日记都不会写进「人格核心卡」。核心卡是人格目录下的 <code>persona-core/&lt;人格&gt;.md</code> 文件，只在控制台手工改、且改动要人确认——这是防性格漂移的最后一道闸。</p>
     </section>
 <section id="section-social-v1" data-page="social-v1" class="card span-all">
       <h2>一代仿真模式（reserved）</h2>
@@ -2798,6 +2863,31 @@ function renderRoleEditor() {
     ? `正在编辑「${roleEditorState.name}」：改完点「保存修改」；改名字会同时重命名文件。`
     : '当前是「新建」模式：填好名称与内容后点「新建人格」；名称与已有的人格同名则会改为保存修改。';
   document.getElementById('roleCreate').textContent = editing ? '保存修改' : '新建人格';
+  refreshCoreStatus();
+}
+
+// 人格内核状态：有/没有、草稿还是生效、是不是按旧角色卡生成的。
+let roleCoreInfo = null;
+async function refreshCoreStatus() {
+  const el = document.getElementById('roleCoreStatus');
+  if (!el) return;
+  const name = roleEditorState.mode === 'edit' ? roleEditorState.name : '';
+  if (!name) { roleCoreInfo = null; el.textContent = '人格内核：新建人格保存时自动生成'; el.className = 'meta'; return; }
+  try {
+    const r = await api('/api/persona-core?role=' + encodeURIComponent(name));
+    if (!r.ok) { roleCoreInfo = null; el.textContent = '人格内核：' + (r.error || '读取失败'); el.className = 'meta err'; return; }
+    roleCoreInfo = r;
+    if (!r.exists) { el.textContent = '人格内核：还没有（点「更新人格内核」生成一份）'; el.className = 'meta err'; return; }
+    const bits = [`${r.chars} 字`, r.draft ? '草稿态 · 不注入' : '每轮注入'];
+    if (r.stale) bits.push('角色卡改过了，建议更新');
+    else if (r.generated) bits.push('自动生成');
+    el.textContent = '人格内核：' + bits.join(' · ');
+    el.className = r.stale ? 'meta err' : 'meta ok';
+  } catch (err) {
+    roleCoreInfo = null;
+    el.textContent = '人格内核：读取失败';
+    el.className = 'meta err';
+  }
 }
 
 function roleEditorWarnings(text) {
@@ -3078,11 +3168,13 @@ document.getElementById('roleCreate').addEventListener('click', async () => {
   }
   const endpoint = editing || exists ? '/api/roles/update' : '/api/roles/create';
   const r = await api(endpoint, 'POST', { name, content });
-  setRoleMsg(r.ok ? `✅ 已保存「${name}」` : ('❌ ' + (r.error || '失败')), r.ok);
+  const coreNote = r.ok && r.core && r.core.created ? `，并生成了人格内核（${r.core.chars} 字）` : '';
+  setRoleMsg(r.ok ? `✅ 已保存「${name}」${coreNote}` : ('❌ ' + (r.error || '失败')), r.ok);
   if (r.ok) {
     roleEditorState = { mode: 'edit', name };
     document.getElementById('roleEditorWarnings').textContent = (r.warnings || []).length ? '⚠️ ' + r.warnings.join('；') : '';
     await refreshRoles();
+    await refreshCoreStatus();
   }
 });
 document.getElementById('roleDuplicate').addEventListener('click', async () => {
@@ -3110,6 +3202,28 @@ document.getElementById('roleDelete').addEventListener('click', async () => {
   refresh();
 });
 document.getElementById('roleFormReset').addEventListener('click', () => resetRoleForm());
+document.getElementById('roleCoreUpdate').addEventListener('click', async () => {
+  const name = (document.getElementById('newRoleName').value || (roleEditorState.mode === 'edit' ? roleEditorState.name : '')).trim();
+  if (!name) { setRoleMsg('请先选择或填写人格名', false); return; }
+  const exists = roleCoreInfo && roleCoreInfo.exists;
+  const hint = exists
+    ? `按「roles/${name}.md」重新生成「${name}」的人格内核？\n\n旧内核会先备份到 persona-core/.bak/，手改过的内容请自己留一份。`
+    : `按「roles/${name}.md」生成「${name}」的人格内核？`;
+  if (!confirm(hint)) return;
+  setRoleMsg('生成内核中…');
+  const r = await api('/api/persona-core/update', 'POST', { role: name, force: true });
+  if (!r.ok) { setRoleMsg('❌ ' + (r.error || '生成失败'), false); return; }
+  await refreshCoreStatus();
+  setRoleMsg(`✅ 内核已更新（${r.chars} 字${r.backup ? '，旧版已备份' : ''}）${(r.warnings || []).length ? '；' + r.warnings.join('；') : ''}`, true);
+});
+document.getElementById('roleCorePreview').addEventListener('click', async () => {
+  const name = (document.getElementById('newRoleName').value || (roleEditorState.mode === 'edit' ? roleEditorState.name : '')).trim();
+  if (!name) { setRoleMsg('请先选择或填写人格名', false); return; }
+  const r = await api('/api/persona-core?role=' + encodeURIComponent(name));
+  if (!r.ok) { setRoleMsg('❌ ' + (r.error || '读取失败'), false); return; }
+  if (!r.exists) { setRoleMsg('这个角色还没有内核', false); return; }
+  alert(`【${name} 的人格内核】${r.draft ? '（草稿态，暂不注入）' : ''}\n\n${r.body}`);
+});
 document.getElementById('newRoleContent').addEventListener('input', updateRoleEditorWarnings);
 
 // ── 仿真提示词 ──────────────────────────────────────────────────────────────
@@ -4466,6 +4580,7 @@ const consolePages = {
   overview: ['运行总览', '让每一次连接，都自然发生。', '掌握桥接状态，轻松管理你的 QQ 智能伙伴。'],
   sessions: ['会话与审批', '让每一段对话，都有迹可循。', '查看 QQ 与 DSH 的会话映射，以及等待你回复的审批和提问。'],
   persona: ['人格与角色', '给你的伙伴，一点独特个性。', '选择已有角色，或用自己的语言写下新的性格与表达方式。'],
+  'memory-diary': ['人格日记', '把相处过的日子，好好收起来。', '按人格查看长期事实与事件日记，补记、删除、导出与导入都在这里。'],
   'social-v2': ['二代仿真', '自主参与，恰到好处。', '管理 AI 的工具、唤醒与发言节奏。展开需要调整的分组，修改后保存参数。'],
   'social-v1': ['一代仿真', '为自然对话，设定合适的节奏。', '调整参与概率、活跃周期和分条发送；所有配置项完整保留。'],
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
@@ -4501,6 +4616,7 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   closeConsoleSearch();
   // 语音库按需加载：进入二代仿真页时才探测（避免每次开控制台都压网关）。
   if (page === 'social-v2' && typeof loadVoiceLibrary === 'function') loadVoiceLibrary();
+  if (page === 'memory-diary' && typeof loadMemoryDiary === 'function') loadMemoryDiary();
   if (focus) {
     document.getElementById('mainContent').focus({ preventScroll: true });
     document.getElementById(target || 'mainContent')?.scrollIntoView({ block: 'start', behavior: 'instant' });
@@ -5084,9 +5200,286 @@ document.getElementById('usageClear').addEventListener('click', async () => {
   refreshUsageRecent();
 });
 
+// ── 人格日记（P3）：长期事实 + 事件日记的查看、补记、删除、导入导出 ──────────
+let mdState = { role: '', scope: '', roles: [], scopes: [], facts: [], diary: [] };
+const MD_CAT_LABEL = { identity: '身份', preference: '喜好', dislike: '雷点', relation: '关系', plan: '计划' };
+const MD_KIND_LABEL = { event: '事件', topic: '话题', thought: '念头', impression: '印象', handoff: '交接' };
+
+// 会话窗口（`private:<QQ>` / `group:<群号>`）→ 给人看的短标签。
+function mdScopeLabel(scope, row) {
+  const s = String(scope ?? '');
+  if (!s) return '未分类';
+  const m = /^(?:private|group):(\d+)$/.exec(s);
+  const who = m ? '会话 ' + m[1] : s;
+  if (!row) return who;
+  return `${who}（${row.facts || 0} 条事实 / ${row.diary || 0} 条日记）`;
+}
+
+function mdTime(at) {
+  const n = Number(at);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  const d = new Date(n);
+  const pad = (v) => String(v).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function mdTable(headers, rows) {
+  const head = headers.map((h) => `<th>${esc(h)}</th>`).join('');
+  return `<table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function mdRenderRoles() {
+  const sel = document.getElementById('mdRole');
+  if (!sel) return;
+  const keep = sel.value || mdState.role;
+  const names = mdState.roles.length ? mdState.roles : (mdState.role ? [mdState.role] : []);
+  sel.replaceChildren();
+  for (const name of names) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  }
+  if (keep && names.includes(keep)) sel.value = keep;
+}
+
+function mdRenderScopes() {
+  const sel = document.getElementById('mdScope');
+  if (!sel) return;
+  const keep = sel.value;
+  const rows = Array.isArray(mdState.scopes) ? mdState.scopes : [];
+  sel.replaceChildren();
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = rows.length ? `全部会话（${rows.length}）` : '全部会话';
+  sel.appendChild(all);
+  for (const row of rows) {
+    const opt = document.createElement('option');
+    opt.value = row.scope;
+    opt.textContent = mdScopeLabel(row.scope, row);
+    sel.appendChild(opt);
+  }
+  if (keep && [...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  else if (rows.length === 1) sel.value = rows[0].scope;
+}
+
+function mdRenderFacts() {
+  const box = document.getElementById('mdFactList');
+  if (!box) return;
+  document.getElementById('mdFactCount').textContent = String(mdState.facts.length);
+  if (!mdState.facts.length) {
+    box.innerHTML = '<div class="empty-state"><strong>还没有长期事实</strong><p>对方聊到「我叫…」「我不吃…」「我养了…」时会自动记一笔；也可以在上面手动补。</p></div>';
+    return;
+  }
+  const rows = mdState.facts.map((f) => {
+    const source = f.source === 'auto' ? '自动' : '手记';
+    return `<tr><td>${esc(MD_CAT_LABEL[f.cat] ?? f.cat ?? '')}</td><td>${esc(f.text)}</td><td>${esc(source)}</td><td>${mdTime(f.at)}</td>`
+      + `<td><button class="small danger" data-md-del="facts" data-at="${Number(f.at) || 0}" data-text="${esc(f.text)}">删</button></td></tr>`;
+  }).join('');
+  box.innerHTML = mdTable(['类别', '内容', '来源', '时间', ''], rows);
+}
+
+function mdRenderDiary() {
+  const box = document.getElementById('mdDiaryList');
+  if (!box) return;
+  document.getElementById('mdDiaryCount').textContent = String(mdState.diary.length);
+  if (!mdState.diary.length) {
+    box.innerHTML = '<div class="empty-state"><strong>还没有日记</strong><p>一起聊出值得记住的事时，桥接会记一条；也可以在上面的输入框里手动补。</p></div>';
+    return;
+  }
+  const rows = mdState.diary.map((d) => {
+    const imp = Number(d.imp) >= 1 ? '★'.repeat(Math.min(5, Number(d.imp))) : '—';
+    return `<tr><td>${esc(MD_KIND_LABEL[d.kind] ?? d.kind ?? '')}</td><td>${esc(d.text)}</td><td>${esc(imp)}</td><td>${mdTime(d.at)}</td>`
+      + `<td><button class="small danger" data-md-del="diary" data-at="${Number(d.at) || 0}" data-text="${esc(d.text)}">删</button></td></tr>`;
+  }).join('');
+  box.innerHTML = mdTable(['类别', '内容', '重要度', '时间', ''], rows);
+}
+
+async function loadMemoryDiary() {
+  const sel = document.getElementById('mdRole');
+  const scopeSel = document.getElementById('mdScope');
+  const want = (sel && sel.value) || '';
+  const scope = (scopeSel && scopeSel.value) || '';
+  const qs = new URLSearchParams();
+  if (want) qs.set('role', want);
+  if (scope) qs.set('scope', scope);
+  try {
+    const r = await api('/api/memory-diary' + (qs.toString() ? '?' + qs.toString() : ''));
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    mdState = {
+      role: r.role || '',
+      scope: r.scope || '',
+      roles: Array.isArray(r.roles) ? r.roles : [],
+      scopes: Array.isArray(r.scopes) ? r.scopes : [],
+      facts: Array.isArray(r.facts) ? r.facts : [],
+      diary: Array.isArray(r.diary) ? r.diary : [],
+    };
+    mdRenderRoles();
+    mdRenderScopes();
+    mdRenderFacts();
+    mdRenderDiary();
+    mdHandoffRefresh();
+    const counts = r.counts || {};
+    const scopeText = mdState.scope ? mdScopeLabel(mdState.scope) : '全部会话';
+    document.getElementById('mdStats').textContent = `${scopeText} · 事实 ${counts.facts ?? mdState.facts.length} 条 · 日记 ${counts.diary ?? mdState.diary.length} 条`;
+  } catch (e) {
+    showConsoleToast('人格记忆读取失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+async function mdHandoffRefresh() {
+  const info = document.getElementById('mdHandoffInfo');
+  const stateEl = document.getElementById('mdHandoffState');
+  if (!mdState.role) { if (stateEl) stateEl.textContent = '—'; return; }
+  try {
+    const qs = new URLSearchParams({ role: mdState.role });
+    if (mdState.scope) qs.set('scope', mdState.scope);
+    const r = await api('/api/handoff?' + qs.toString());
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    mdState.handoff = r;
+    const at = r.latest && r.latest.at ? new Date(r.latest.at) : null;
+    const when = at ? `${at.getMonth() + 1}/${at.getDate()} ${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}` : '';
+    if (stateEl) stateEl.textContent = r.latest ? `上次 ${when}` : '还没有';
+    if (info) {
+      const turns = Number(r.turns) || 0;
+      const cap = Number(r.remindAfterTurns) || 0;
+      info.textContent = `${mdState.scope ? mdScopeLabel(mdState.scope) : '全部会话'} · 已聊 ${turns} 轮${cap > 0 ? `（${cap} 轮起提醒）` : ''}${r.pending ? ' · 有一张还没读' : ''}`;
+    }
+    const warnEl = document.getElementById('mdHandoffWarn');
+    if (warnEl) {
+      const turns = Number(r.turns) || 0;
+      const cap = Number(r.remindAfterTurns) || 0;
+      if (cap > 0 && turns >= cap && mdState.scope) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = `这个窗口已经聊了 ${turns} 轮，超过提醒线 ${cap} 轮了。建议现在生成交接单换新会话，免得开始丢前面的细节。`;
+      } else {
+        warnEl.style.display = 'none';
+        warnEl.textContent = '';
+      }
+    }
+  } catch (e) {
+    if (info) info.textContent = '交接单状态读取失败';
+  }
+}
+
+async function mdHandoffMake() {
+  if (!mdState.role) { showConsoleToast('先选一个人格'); return; }
+  if (!mdState.scope) { showConsoleToast('先在左边选一个会话窗口'); return; }
+  const ok = confirm(`把这个窗口的这段记忆写成交接单，然后换一个新会话？\n\n人格：${mdState.role}\n窗口：${mdScopeLabel(mdState.scope)}\n\n不会删事实和日记，只是让新会话开头读一遍交接单。`);
+  if (!ok) return;
+  try {
+    const r = await api('/api/handoff/rotate', 'POST', { scope: mdState.scope });
+    if (!r.ok) throw new Error(r.error || '生成失败');
+    showConsoleToast(`交接单已生成（${r.turns} 轮）${r.retired ? '，旧会话已退掉，下次唤醒进新会话' : '，当前没有活跃会话'}`);
+    await loadMemoryDiary();
+  } catch (e) {
+    showConsoleToast('生成失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+function mdHandoffView() {
+  const latest = mdState.handoff && mdState.handoff.latest;
+  if (!latest) { showConsoleToast('还没有交接单'); return; }
+  const text = String(latest.markdown || '').slice(0, 6000) || JSON.stringify(latest, null, 2).slice(0, 6000);
+  alert(text);
+}
+
+async function mdAdd(store) {
+  const isFact = store === 'facts';
+  const textEl = document.getElementById(isFact ? 'mdFactText' : 'mdDiaryText');
+  const text = (textEl.value || '').trim();
+  if (!text) { showConsoleToast(isFact ? '先写点什么，比如「对方不吃辣」' : '先写点什么，比如「一起给猫起名」'); return; }
+  if (!mdState.scope) { showConsoleToast('先在左边选一个会话窗口，再记进去'); return; }
+  try {
+    const body = { role: mdState.role, scope: mdState.scope, store, text };
+    if (isFact) body.cat = document.getElementById('mdFactCat').value;
+    else body.kind = document.getElementById('mdDiaryKind').value;
+    const r = await api('/api/memory-diary/add', 'POST', body);
+    if (!r.ok) throw new Error(r.skipped === 'duplicate' ? '这条已经有了' : (r.error || '添加失败'));
+    textEl.value = '';
+    showConsoleToast(isFact ? '已记下' : '已写进日记');
+    loadMemoryDiary();
+  } catch (e) {
+    showConsoleToast('添加失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+async function mdExport() {
+  try {
+    const res = await fetch('/api/memory-diary/export' + (mdState.role ? '?role=' + encodeURIComponent(mdState.role) : ''), {
+      headers: localStorage.getItem('consoleToken') ? { 'x-console-token': localStorage.getItem('consoleToken') } : {},
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const disp = res.headers.get('content-disposition') || '';
+    const match = /filename="?([^";]+)"?/.exec(disp);
+    a.href = url;
+    a.download = match ? match[1] : 'memory-diary.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    showConsoleToast('已导出，可以带走换机器');
+  } catch (e) {
+    showConsoleToast('导出失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+async function mdImport(file) {
+  try {
+    const text = await file.text();
+    const bundle = JSON.parse(text);
+    if (!bundle || typeof bundle.roles !== 'object' || !bundle.roles) throw new Error('不是本功能导出的文件（缺少 roles）');
+    const r = await api('/api/memory-diary/import', 'POST', { bundle });
+    if (!r.ok) throw new Error(r.error || '导入失败');
+    const parts = Object.entries(r.summary || {}).map(([role, c]) => `${role}：事实 ${c.facts} 条、日记 ${c.diary} 条`);
+    showConsoleToast(parts.length ? '导入完成 · ' + parts.join('；') : '文件里没有可导入的条目');
+    loadMemoryDiary();
+  } catch (e) {
+    showConsoleToast('导入失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+document.addEventListener('click', async (event) => {
+  const btn = event.target.closest('[data-md-del]');
+  if (!btn) return;
+  const store = btn.dataset.mdDel === 'facts' ? 'facts' : 'diary';
+  const text = btn.dataset.text;
+  if (!confirm(`删除这条${store === 'facts' ? '事实' : '日记'}？删了就找不回来了。\n\n${text}`)) return;
+  try {
+    const r = await api('/api/memory-diary/delete', 'POST', {
+      role: mdState.role, scope: mdState.scope, store, at: Number(btn.dataset.at) || 0, text,
+    });
+    if (!r.ok) throw new Error(r.error || '删除失败');
+    showConsoleToast('已删除');
+    loadMemoryDiary();
+  } catch (e) {
+    showConsoleToast('删除失败：' + (e && e.message ? e.message : e));
+  }
+});
+
+document.getElementById('mdRefresh').addEventListener('click', loadMemoryDiary);
+document.getElementById('mdExport').addEventListener('click', mdExport);
+document.getElementById('mdImportPick').addEventListener('click', () => document.getElementById('mdImportFile').click());
+document.getElementById('mdImportFile').addEventListener('change', (event) => {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (file) mdImport(file);
+});
+document.getElementById('mdFactAdd').addEventListener('click', () => mdAdd('facts'));
+document.getElementById('mdDiaryAdd').addEventListener('click', () => mdAdd('diary'));
+document.getElementById('mdRole').addEventListener('change', () => {
+  const scopeSel = document.getElementById('mdScope');
+  if (scopeSel) scopeSel.value = '';
+  loadMemoryDiary();
+});
+document.getElementById('mdScope').addEventListener('change', loadMemoryDiary);
+document.getElementById('mdHandoffMake').addEventListener('click', mdHandoffMake);
+document.getElementById('mdHandoffView').addEventListener('click', mdHandoffView);
+
 setConsolePage(location.hash.slice(1), { updateHash:false });
 
-refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
+refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadMemoryDiary(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
 setInterval(() => { refresh(); refreshSessions(); refreshPending(); refreshSocialStatus(); refreshSlang(); }, 3000);
 // 用量看板只在本页可见时轮询：既保证「实时」，又不让其它页白白多打两份接口。
 setInterval(() => { if (currentConsolePage !== 'usage') return; refreshUsage(); refreshUsageChart(); refreshUsageRecent(); }, 3000);

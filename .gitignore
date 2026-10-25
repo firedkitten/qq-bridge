@@ -114,3 +114,9 @@ _import-backup-*
 /deploy/README.md
 /docs/本机部署与运维笔记.md
 /docs/云端部署选型与厂商对比.md
+
+# 独立发布的插件仓库（自带 .git，见 https://github.com/firedkitten/persona-memory-diary）
+/qqbridge-tool/memory-diary/
+
+# 个人角色卡（未公开发布）
+/roles/小鱼.md
