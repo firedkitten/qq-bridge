@@ -10,10 +10,13 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\sync-memory.ps1 -Apply          # 拉下来并覆盖本地 state\
 #   powershell -ExecutionPolicy Bypass -File scripts\sync-memory.ps1 -Direction push # 把本地 state 推回服务器
 #
-# 只会搬运这三样，不碰代码：
+# 只搬这三样，不碰代码：
 #   state/                              桥接侧（会话表、人格记忆缓存、日志等）
 #   qqbridge-tool/memory-diary/state/   人格档案（facts/diary/archive/handoff）
 #   qqbridge-tool/memory-diary/persona-core/  内核（含 .bak；真实内核不进 git，只能靠它搬）
+#
+# 实现上刻意不用 tar：Windows 自带的 tar.exe 解 Unix tar 包时，中文目录名会被当成
+# 「Invalid empty pathname」丢掉（实测），所以这里一律用 scp -r 逐目录传。
 param(
   [string]$Remote = 'root@123.57.37.192',
   [string]$KeyFile = '',
@@ -34,52 +37,47 @@ $work = Join-Path $repo '.sync'
 New-Item -ItemType Directory -Force -Path $work | Out-Null
 
 function Invoke-Scp([string[]]$ScpArgs) {
-  & scp -i $KeyFile -o StrictHostKeyChecking=no @ScpArgs
+  & scp -r -i $KeyFile -o StrictHostKeyChecking=no @ScpArgs
   if ($LASTEXITCODE -ne 0) { throw "scp 失败（exit $LASTEXITCODE）" }
+}
+function Invoke-Ssh([string]$Cmd) {
+  $out = & ssh -i $KeyFile -o StrictHostKeyChecking=no $Remote $Cmd
+  if ($LASTEXITCODE -ne 0) { throw "ssh 失败：$Cmd" }
+  return $out
+}
+function Count-Lines([string]$Root, [string]$Pattern) {
+  $n = 0
+  Get-ChildItem -Path $Root -Recurse -File -Filter $Pattern -ErrorAction SilentlyContinue | ForEach-Object {
+    $n += (Get-Content $_.FullName -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
+  }
+  return $n
 }
 
 if ($Direction -eq 'pull') {
-  $tarName = "memory-$stamp.tgz"
-  $remoteTar = "/tmp/$tarName"
   $existing = @()
   foreach ($p in $paths) {
-    $check = & ssh -i $KeyFile -o StrictHostKeyChecking=no $Remote "test -e '$RemoteRoot/$p' && echo yes || echo no"
-    if ($check.Trim() -eq 'yes') { $existing += $p }
+    $check = (Invoke-Ssh "test -e '$RemoteRoot/$p' && echo yes || echo no").Trim()
+    if ($check -eq 'yes') { $existing += $p }
   }
   if (-not $existing.Count) { throw "服务器上这三样都不存在：$($paths -join ', ')" }
 
-  $list = ($existing | ForEach-Object { "'$RemoteRoot/$_'" }) -join ' '
-  & ssh -i $KeyFile -o StrictHostKeyChecking=no $Remote "cd '$RemoteRoot' && tar czf '$remoteTar' $list && ls -l '$remoteTar'"
-  if ($LASTEXITCODE -ne 0) { throw '服务器打包失败' }
-
-  $localTar = Join-Path $work $tarName
-  Invoke-Scp @("${Remote}:$remoteTar", $localTar)
-  & ssh -i $KeyFile -o StrictHostKeyChecking=no $Remote "rm -f '$remoteTar'"
-
   $snap = Join-Path $work "memory-$stamp"
-  New-Item -ItemType Directory -Force -Path $snap | Out-Null
-  & tar xzf $localTar -C $snap
-  if ($LASTEXITCODE -ne 0) { throw '解包失败' }
-
-  $facts = 0; $diary = 0; $archive = 0
-  Get-ChildItem -Path $snap -Recurse -File -Filter 'facts.jsonl' -ErrorAction SilentlyContinue | ForEach-Object {
-    $facts += (Get-Content $_.FullName -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
+  foreach ($p in $existing) {
+    $dest = Join-Path $snap (Split-Path $p -Parent)
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    Write-Host "拉取 $p ..."
+    Invoke-Scp @("${Remote}:$RemoteRoot/$p", $dest)
   }
-  Get-ChildItem -Path $snap -Recurse -File -Filter 'diary.jsonl' -ErrorAction SilentlyContinue | ForEach-Object {
-    $diary += (Get-Content $_.FullName -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
-  }
-  Get-ChildItem -Path $snap -Recurse -File -Filter '*.jsonl' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Directory.Name -eq 'archive' } | ForEach-Object {
-      $archive += (Get-Content $_.FullName -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
-    }
 
+  $facts = Count-Lines $snap 'facts.jsonl'
+  $diary = Count-Lines $snap 'diary.jsonl'
   Write-Host "已拉取快照：$snap"
-  Write-Host "  事实 $facts 条 · 日记 $diary 条 · 档案 $archive 条"
+  Write-Host "  事实 $facts 条 · 日记 $diary 条"
 
   if ($Apply) {
     $backup = Join-Path $work "prev-$stamp"
     New-Item -ItemType Directory -Force -Path $backup | Out-Null
-    foreach ($p in $paths) {
+    foreach ($p in $existing) {
       $src = Join-Path $snap $p
       $dst = Join-Path $repo $p
       if (-not (Test-Path $src)) { continue }
@@ -103,15 +101,14 @@ else {
     $ans = Read-Host "这会用本地 state 覆盖服务器 $RemoteRoot 上的同名目录，继续吗？(yes/N)"
     if ($ans -ne 'yes') { Write-Host '已取消'; return }
   }
-  $tarName = "memory-push-$stamp.tgz"
-  $localTar = Join-Path $work $tarName
-  $present = $paths | Where-Object { Test-Path (Join-Path $repo $_) }
-  if (-not $present) { throw '本地没有可推送的 state 目录' }
-  & tar czf $localTar -C $repo @present
-  if ($LASTEXITCODE -ne 0) { throw '本地打包失败' }
-  Invoke-Scp @($localTar, "${Remote}:/tmp/$tarName")
-  $remoteCmd = "cd '$RemoteRoot' && tar xzf '/tmp/$tarName' && rm -f '/tmp/$tarName' && chown -R qqbridge:qqbridge state qqbridge-tool/memory-diary/state qqbridge-tool/memory-diary/persona-core 2>/dev/null; echo PUSH_OK"
-  & ssh -i $KeyFile -o StrictHostKeyChecking=no $Remote $remoteCmd
-  if ($LASTEXITCODE -ne 0) { throw '服务器解包失败' }
+  $present = @($paths | Where-Object { Test-Path (Join-Path $repo $_) })
+  if (-not $present.Count) { throw '本地没有可推送的 state 目录' }
+  foreach ($p in $present) {
+    $parent = "$RemoteRoot/" + (Split-Path $p -Parent) -replace '\\', '/'
+    Invoke-Ssh "mkdir -p '$parent'"
+    Write-Host "推送 $p ..."
+    Invoke-Scp @((Join-Path $repo $p), "${Remote}:$parent/")
+  }
+  Invoke-Ssh "chown -R qqbridge:qqbridge $RemoteRoot/state $RemoteRoot/qqbridge-tool/memory-diary/state $RemoteRoot/qqbridge-tool/memory-diary/persona-core 2>/dev/null; echo PUSH_OK"
   Write-Host '已推送到服务器。建议重启桥接：ssh 上去 systemctl restart qq-bridge'
 }

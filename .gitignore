@@ -120,3 +120,6 @@ _import-backup-*
 
 # 个人角色卡（未公开发布）
 /roles/小鱼.md
+
+# 记忆同步快照
+/.sync/
