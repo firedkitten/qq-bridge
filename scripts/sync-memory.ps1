@@ -23,7 +23,8 @@ param(
   [string]$RemoteRoot = '/opt/qq-bridge',
   [ValidateSet('pull', 'push')][string]$Direction = 'pull',
   [switch]$Apply,
-  [switch]$Force
+  [switch]$Force,
+  [int]$PruneDays = 14
 )
 
 $ErrorActionPreference = 'Stop'
@@ -73,6 +74,14 @@ if ($Direction -eq 'pull') {
   $diary = Count-Lines $snap 'diary.jsonl'
   Write-Host "已拉取快照：$snap"
   Write-Host "  事实 $facts 条 · 日记 $diary 条"
+
+  # 快照只增不减会吃掉磁盘，默认留最近 14 天
+  if ($PruneDays -gt 0) {
+    $cut = (Get-Date).AddDays(-$PruneDays)
+    Get-ChildItem $work -Directory -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like 'memory-*' -and $_.LastWriteTime -lt $cut } |
+      ForEach-Object { Write-Host "  清掉过期快照：$($_.Name)"; Remove-Item $_.FullName -Recurse -Force }
+  }
 
   if ($Apply) {
     $backup = Join-Path $work "prev-$stamp"
