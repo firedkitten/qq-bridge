@@ -223,7 +223,7 @@ v0.1.2 起，桥接接了一个独立工具 `persona-memory-diary`（源码在 `
 
 `src/bridge.js` 顶部是静态 import，所以这份工具必须放到位才能启动；不需要这套记忆时，删掉对应的 import 与调用点即可。
 - **按会话窗口隔离**：每条事实/日记带 `conv`，注入时只取「本窗口 + 无窗口归属的通用条目」，同一个人格的两个窗口各记各的。
-- **不自动换会话**：上下文将满只发提醒（`handoff.remindAfterTurns`，默认 40 轮），换不换由人决定；交接单在下一个会话里只读一次，投递成功才标记已读。
+- **不自动换会话**：上下文将满只发提醒（`handoff.remindAfterTurns`，默认 100 轮、控制台可改），换不换由人决定；交接单在下一个会话里只读一次，投递成功才标记已读。
 - **数据可迁移**：全是纯文本，`rsync` 或控制台导出即一份档案；`persona-core/` 与 `state/` 都不入库。`scripts/sync-memory.ps1` 能把服务器上的 `state/`、`memory-diary/state/`、`persona-core/` 拉成本地快照（`-Apply` 才覆盖，覆盖前自动备份），`-Direction push` 反向推回。
 
 `src/bridge.js` 顶部是静态 import，所以这份工具必须放到位才能启动；不需要这套记忆时，删掉对应的 import 与调用点即可。

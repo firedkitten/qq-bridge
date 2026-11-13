@@ -1131,7 +1131,7 @@ function loadConfig() {
   cfg.facts = { enabled: true, maxInjectChars: DEFAULT_FACTS_INJECT_CHARS, maxEntries: 6, ...(file.facts ?? {}) };
   // 交接单（P4）：remindAfterTurns>0 时，聊到这么多轮就在下一次唤醒前发一条提醒，
   // **不自动换会话**——换不换、什么时候换由人在控制台决定；0 = 不提醒。
-  cfg.handoff = { enabled: true, remindAfterTurns: 40, notifyQQ: true, maxInjectChars: HANDOFF_BLOCK_MAX_CHARS, ...(file.handoff ?? {}) };
+  cfg.handoff = { enabled: true, remindAfterTurns: 100, notifyQQ: true, maxInjectChars: HANDOFF_BLOCK_MAX_CHARS, ...(file.handoff ?? {}) };
 
   return cfg;
 }
@@ -4646,6 +4646,23 @@ async function main() {
           if (!role) { sendJson({ ok: false, error: '缺少 role' }, 400); return; }
           const result = markHandoffUsed(MEMORY_DIARY_DIR, role);
           sendJson({ ok: true, role, ...result });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/handoff/config') {
+          const body = await readBody();
+          const raw = Number(body.remindAfterTurns);
+          if (!Number.isFinite(raw) || raw < 0 || raw > 10000) {
+            sendJson({ ok: false, error: '提醒轮数要填 0~10000 的整数（0 = 不提醒）' }, 400);
+            return;
+          }
+          const next = Math.floor(raw);
+          const configFile = path.join(ROOT, 'config.json');
+          const file = readConfigObject(configFile);
+          file.handoff = { ...(file.handoff ?? {}), remindAfterTurns: next };
+          atomicWriteJson(configFile, file);
+          cfg.handoff = { ...(cfg.handoff ?? {}), remindAfterTurns: next };
+          log(`控制台：上下文提醒阈值已设为 ${next} 轮（0 = 不提醒）`);
+          sendJson({ ok: true, remindAfterTurns: next });
           return;
         }
       }

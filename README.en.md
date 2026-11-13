@@ -54,7 +54,7 @@ handoff sheet  where the last session left off                  → read once in
 
 - Survives truncation and repeated compaction: budgets are fixed, so tone and agreements do not decay as the chat grows.
 - Per-window isolation: different conversation windows of the same persona keep separate memories.
-- No silent session switching: when context is nearly full the bridge only reminds you (`handoff.remindAfterTurns`, default 40 turns); you rotate manually and the handoff sheet is read once.
+- No silent session switching: when context is nearly full the bridge only reminds you (`handoff.remindAfterTurns`, default 100 turns, editable in the console); you rotate manually and the handoff sheet is read once.
 - Console page "Persona diary": view / add / delete per persona and per window, JSON export and import.
 
 It is its own repository; clone it into `qqbridge-tool/memory-diary/` before the first start (`src/bridge.js` imports it with a static path and fails to boot without it). Data lives in `qqbridge-tool/memory-diary/{persona-core,state}/` and is never committed.

@@ -1956,6 +1956,11 @@ button:active:not(:disabled) {
           <button id="mdHandoffView" class="small">查看交接单</button>
           <span class="meta" id="mdHandoffInfo">—</span>
         </div>
+        <div class="row">
+          <label>提醒轮数 <input id="mdRemindTurns" type="number" min="0" max="10000" step="1" style="width:6.5em" /></label>
+          <button id="mdRemindSave" class="small">保存</button>
+          <span class="meta">默认 100 轮；填 0 = 不提醒</span>
+        </div>
         <div class="meta" id="mdHandoffWarn" style="display:none;color:#d9534f"></div>
       </details>
 
@@ -5358,6 +5363,8 @@ async function mdHandoffRefresh() {
       const cap = Number(r.remindAfterTurns) || 0;
       info.textContent = `${mdState.scope ? mdScopeLabel(mdState.scope) : '全部会话'} · 已聊 ${turns} 轮${cap > 0 ? `（${cap} 轮起提醒）` : ''}${r.pending ? ' · 有一张还没读' : ''}`;
     }
+    const capInput = document.getElementById('mdRemindTurns');
+    if (capInput && document.activeElement !== capInput) capInput.value = String(Number(r.remindAfterTurns) || 0);
     const warnEl = document.getElementById('mdHandoffWarn');
     if (warnEl) {
       const turns = Number(r.turns) || 0;
@@ -5395,6 +5402,20 @@ function mdHandoffView() {
   if (!latest) { showConsoleToast('还没有交接单'); return; }
   const text = String(latest.markdown || '').slice(0, 6000) || JSON.stringify(latest, null, 2).slice(0, 6000);
   alert(text);
+}
+
+async function mdRemindSave() {
+  const el = document.getElementById('mdRemindTurns');
+  const n = Number(el ? el.value : NaN);
+  if (!Number.isFinite(n) || n < 0 || n > 10000) { showConsoleToast('填 0~10000 的整数（0 = 不提醒）'); return; }
+  try {
+    const r = await api('/api/handoff/config', 'POST', { remindAfterTurns: Math.floor(n) });
+    if (!r.ok) throw new Error(r.error || '保存失败');
+    showConsoleToast(`已设为 ${r.remindAfterTurns} 轮提醒`);
+    await mdHandoffRefresh();
+  } catch (e) {
+    showConsoleToast('保存失败：' + (e && e.message ? e.message : e));
+  }
 }
 
 // ── 档案留存：只读底稿，不进上下文 ──────────────────────────────
@@ -5560,6 +5581,7 @@ document.getElementById('mdRole').addEventListener('change', () => {
 document.getElementById('mdScope').addEventListener('change', loadMemoryDiary);
 document.getElementById('mdHandoffMake').addEventListener('click', mdHandoffMake);
 document.getElementById('mdHandoffView').addEventListener('click', mdHandoffView);
+document.getElementById('mdRemindSave').addEventListener('click', mdRemindSave);
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 

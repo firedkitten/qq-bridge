@@ -285,8 +285,19 @@ await test('生成交接单后新会话首次唤醒带上它，读一次即作�
       assert.equal(pending.status, 200, pending.body);
       assert.equal(pending.json.pending, true, '生成后应为待读状态');
       assert.equal(pending.json.autoAfterTurns, 0, '桥接绝不自动换会话：autoAfterTurns 恒为 0');
-      assert.ok(Number(pending.json.remindAfterTurns) > 0, '应有提醒阈值（默认 40 轮）');
+      assert.equal(pending.json.remindAfterTurns, 100, '提醒阈值默认 100 轮');
       assert.ok(pending.json.latest?.facts?.some((f) => String(f).includes('小周')) || JSON.stringify(pending.json.latest).includes('小周'), '交接单应带上这一窗的事实');
+
+      // 手动改提醒轮数：立刻生效，并落回 config.json
+      const cfg1 = await call(port, '/api/handoff/config', { method: 'POST', headers: ADMIN, body: { remindAfterTurns: 150 } });
+      assert.equal(cfg1.status, 200, cfg1.body);
+      assert.equal(cfg1.json.remindAfterTurns, 150);
+      const after = await call(port, '/api/handoff?role=' + encodeURIComponent(ROLE_A), { headers: ADMIN });
+      assert.equal(after.json.remindAfterTurns, 150, '改完应当读回新值');
+      const cfgFile = JSON.parse(fs.readFileSync(path.join(h.temp, 'config.json'), 'utf8'));
+      assert.equal(cfgFile.handoff.remindAfterTurns, 150, '阈值应写进 config.json');
+      const bad = await call(port, '/api/handoff/config', { method: 'POST', headers: ADMIN, body: { remindAfterTurns: -1 } });
+      assert.equal(bad.status, 400, '负数应被拒');
 
       const first = h.buildWakePromptV2('private:789', 'question');
       assert.ok(first.includes('【交接单'), '换会话后的第一次唤醒应注入交接单');
