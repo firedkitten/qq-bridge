@@ -326,6 +326,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_memory_query: 'memory',
   qq_memory_remove: 'memory',
   qq_memory_clear: 'memory',
+  qq_diary_write: 'diary',
   qq_slang_query: 'slangQuery',
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
@@ -402,7 +403,15 @@ const bootBridgeMode = (() => {
 })();
 const registerLegacyReadTools = bootBridgeMode === '' || bootBridgeMode === 'closed-agent';
 if (!registerLegacyReadTools) {
-  console.error(`[snowluma-safe] 当前桥接模式 ${bootBridgeMode}：不注册旧只读工具（qq_list_groups / qq_get_group_history），改用带令牌的 v2 读工具`);
+  // 这行只是「我启在哪个模式」的回执。dsh 的 stdio transport 默认 stderr: "inherit"
+  // （@modelcontextprotocol/client 的 stdio.mjs），所以它会原样打到用户终端，
+  // 让每次 `dsh web` 启动都多一行噪声（2026-10-26 排查结论）。
+  // 记法：交互终端（TTY）默认静默；journald / 文件重定向（非 TTY）照旧输出，
+  // `journalctl -u dsh-web | grep snowluma-safe` 仍能验证；想在终端强行看到就设
+  // QQ_BRIDGE_VERBOSE=1。
+  if (!process.stderr.isTTY || process.env.QQ_BRIDGE_VERBOSE === '1') {
+    console.error(`[snowluma-safe] 当前桥接模式 ${bootBridgeMode}：不注册旧只读工具（qq_list_groups / qq_get_group_history），改用带令牌的 v2 读工具`);
+  }
 }
 
 if (registerLegacyReadTools) {
@@ -929,6 +938,29 @@ server.tool(
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: `记忆写入失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
+  'qq_diary_write',
+  '写一条自己的日记：内容不限（今天想到的事、心情、看到的、想对谁说的话都行），不一定是聊天里发生的事。想写就写；没什么想写的就别调，不要为了凑数而写。写完会出现在控制台「人格日记」页，并按会话窗口存成 Markdown。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    text: z.string().describe('日记正文，200 字以内，一条只写一件事'),
+    kind: z.enum(['self', 'thought', 'event', 'topic', 'impression']).optional().describe('可选：自记（self，默认）/ 念头 / 事件 / 话题 / 印象')
+  },
+  async ({ key, token, text, kind }) => {
+    try {
+      const data = await agentApi('/api/socialV2/diary-write', {
+        method: 'POST',
+        body: JSON.stringify({ key, text, kind: kind || 'self' }),
+        headers: { 'x-agent-token': token }
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `日记没写进去：${error?.message ?? error}` }], isError: true };
     }
   }
 );

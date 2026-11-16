@@ -393,6 +393,76 @@ await test('档案接口能列出按天归档的写入与删除记录', async ()
   } finally { await h.close(); }
 });
 
+// ── 11. md 视图：按会话窗口落盘、接口可取、窗口之间不串 ─────────────────────
+await test('md 视图按会话窗口落盘，并能从接口取到', async () => {
+  const h = await bridgeHarness({
+    files: { 'state/current-role.json': { role: ROLE_A, mode: 'active' } },
+  });
+  try {
+    await withServer(h, async (port) => {
+      await call(port, '/api/memory-diary/add', {
+        method: 'POST',
+        headers: ADMIN,
+        body: { role: ROLE_A, store: 'diary', kind: 'impression', text: '她说我话少', scope: 'private:42' },
+      });
+      await call(port, '/api/memory-diary/add', {
+        method: 'POST',
+        headers: ADMIN,
+        body: { role: ROLE_A, store: 'diary', kind: 'event', text: '一群人玩梗', scope: 'group:7' },
+      });
+
+      const res = await call(port, `/api/memory-diary/md?role=${encodeURIComponent(ROLE_A)}&scope=private:42`, { headers: ADMIN });
+      assert.equal(res.status, 200, `md 接口应 200，实际 ${res.status} ${res.body}`);
+      const md = JSON.parse(res.body);
+      assert.match(md.text, /\[印象\] 她说我话少/, '应保留 kind 前缀');
+      assert.doesNotMatch(md.text, /一群人玩梗/, '不能把另一个窗口的记忆带进来');
+
+      assert.ok(md.file && fs.existsSync(md.file), `应真的落盘：${md.file}`);
+      assert.match(fs.readFileSync(md.file, 'utf8'), /她说我话少/);
+
+      const other = JSON.parse((await call(port, `/api/memory-diary/md?role=${encodeURIComponent(ROLE_A)}&scope=group:7`, { headers: ADMIN })).body);
+      assert.match(other.text, /一群人玩梗/);
+      assert.doesNotMatch(other.text, /她说我话少/);
+      assert.notEqual(other.file, md.file, '不同窗口是不同文件');
+    });
+  } finally { await h.close(); }
+});
+
+// ── 12. 角色自己写日记：内容不限、按窗口落盘、出现在 md 视图 ─────────────────
+await test('角色可以自己写日记（qq_diary_write 背后的接口），内容不限', async () => {
+  const h = await bridgeHarness({ files: { 'state/current-role.json': { role: ROLE_A, mode: 'active' } } });
+  try {
+    h.setMode('reserved2');
+    await withServer(h, async (port) => {
+      const asAgent = { ...ADMIN, 'x-agent-token': h.getSocialV2State('group:456').agentToken, 'x-agent-call': '1' };
+      const wrote = await call(port, '/api/socialV2/diary-write', {
+        method: 'POST',
+        headers: asAgent,
+        body: { key: 'group:456', text: '  今天窗外下了很久的雨  ', kind: 'self' },
+      });
+      assert.equal(wrote.status, 200, `自记应成功，实际 ${wrote.status} ${wrote.body}`);
+
+      const md = JSON.parse((await call(port, `/api/memory-diary/md?role=${encodeURIComponent(ROLE_A)}&scope=group:456`, { headers: ADMIN })).body);
+      assert.match(md.text, /\[自记\] 今天窗外下了很久的雨/, 'md 里应有自记条目，并保留 [自记] 前缀');
+
+      const otherRes = await call(port, `/api/memory-diary/md?role=${encodeURIComponent(ROLE_A)}&scope=private:789`, { headers: ADMIN });
+      if (otherRes.status === 200) {
+        assert.doesNotMatch(JSON.parse(otherRes.body).text ?? '', /今天窗外下了很久的雨/, '不能串到别的窗口');
+      }
+
+      const empty = await call(port, '/api/socialV2/diary-write', {
+        method: 'POST', headers: asAgent, body: { key: 'group:456', text: '   ' },
+      });
+      assert.equal(empty.status, 400, '空内容应 400');
+
+      const badToken = await call(port, '/api/socialV2/diary-write', {
+        method: 'POST', headers: { ...ADMIN, 'x-agent-token': 'wrong' }, body: { key: 'group:456', text: 'x' },
+      });
+      assert.ok([401, 403].includes(badToken.status), `错 token 应被拒，实际 ${badToken.status}`);
+    });
+  } finally { await h.close(); }
+});
+
 if (failures) {
   console.error(`\n失败 ${failures} 项`);
   process.exitCode = 1;

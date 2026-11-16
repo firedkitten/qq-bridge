@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 04-dsh-plugins.sh —— 把 qq-mode-console / qq-agent-presets 两个插件装进服务器上的 DSH
+# 04-dsh-plugins.sh —— 把 qq-mode-console / qq-agent-presets 两个本地插件
+#                      和 billion-context（npm 包）装进服务器上的 DSH
 #
 # 为什么需要这一步：
 #   DSH 的「设置命名空间」和「agent preset」都由插件提供。服务器上的 DSH 是新装的，
@@ -8,10 +9,13 @@
 #       settings/rejected: No configurable plugin entry "qq-mode"
 #     · 没有 qq-chat-v2 预设 → 二代仿真模式没有对应的人格/协议层
 #     · 没有 MCP 区块 → 所有 qq_* 工具（发消息/读消息/记忆/表情）都不存在
-#   本脚本把仓库里的两个插件 link 进 $DSH_HOME/profile/web，跑一次 pnpm install，
+#     · 没有 billion-context → 长会话没有任何上下文压缩，compress / decompress /
+#       acp_status / acp_cache 这些工具不存在，一个会话聊久了就会被原始上下文撑爆
+#   本脚本把仓库里的两个插件 link 进 $DSH_HOME/profile/web，把 billion-context 作为
+#   npm 依赖写进同一个 profile（版本见 BILLION_CONTEXT_VERSION），跑一次 pnpm install，
 #   再跑 scripts/setup-dsh.mjs 挂上三个 MCP server。
 #
-# 幂等：可重复执行。
+# 幂等：可重复执行（已经装过 billion-context 时保留现有版本范围，不会按回默认值）。
 # 用法：sudo -u qqbridge env HOME=/opt/qq-bridge DSH_HOME=/opt/qq-bridge/.dsh bash 04-dsh-plugins.sh
 
 set -euo pipefail
@@ -20,6 +24,8 @@ REPO="${REPO:-/opt/qq-bridge}"
 DSH_HOME_DIR="${DSH_HOME_DIR:-/opt/qq-bridge/.dsh}"
 PROFILE="${DSH_PROFILE:-web}"
 PNPM_REGISTRY="${PNPM_REGISTRY:-https://registry.npmmirror.com}"
+# billion-context 从 npm 装（不是本地 link）。留空则跳过安装；默认锁在 0.1.x 最新小版本。
+BILLION_CONTEXT_VERSION="${BILLION_CONTEXT_VERSION:-^0.1.207}"
 OWNER="${OWNER:-qqbridge}"
 
 PROFILE_DIR="$DSH_HOME_DIR/profiles/$PROFILE"
@@ -34,27 +40,39 @@ die() { printf '\n\033[31m[x] %s\033[0m\n' "$*" >&2; exit 1; }
 [[ -d "$REPO/plugins/qq-mode-console" ]] || die "找不到 $REPO/plugins/qq-mode-console"
 [[ -d "$REPO/plugins/qq-agent-presets" ]] || die "找不到 $REPO/plugins/qq-agent-presets"
 
-say "1/4 建插件链接（$PLUGINS_DIR）"
+say "1/5 建插件链接（$PLUGINS_DIR）"
 mkdir -p "$PLUGINS_DIR"
 for p in qq-mode-console qq-agent-presets; do
   ln -sfn "$REPO/plugins/$p" "$PLUGINS_DIR/$p"
   ok "$PLUGINS_DIR/$p -> $REPO/plugins/$p"
 done
 
-say "2/4 写 profile 依赖与 bundles（$PROFILE_DIR/package.json）"
-node - "$PROFILE_DIR/package.json" "$PLUGINS_DIR" <<'NODE'
+say "2/5 写 profile 依赖与 bundles（$PROFILE_DIR/package.json）"
+node - "$PROFILE_DIR/package.json" "$PLUGINS_DIR" "$BILLION_CONTEXT_VERSION" <<'NODE'
 const fs = require('fs');
-const [file, pluginsDir] = process.argv.slice(2);
+const [file, pluginsDir, biliVersion] = process.argv.slice(2);
 const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
-const names = ['qq-mode-console', 'qq-agent-presets'];
+
+// 仓库内的两个插件用 link 装，改动即时生效。
+const linkNames = ['qq-mode-console', 'qq-agent-presets'];
 pkg.dependencies = pkg.dependencies || {};
-for (const n of names) {
+for (const n of linkNames) {
   pkg.dependencies[n] = `link:${pluginsDir}/${n}`;
 }
+
+// billion-context 走 npm（bundle 自带 dsh.bundle.patch.yml，注册 bili-native +
+// bili-compaction-gate 两个条目，并把 stock preset 的自动压缩换成它的策略）。
+// 已经装过就保留现有 semver 范围，避免重跑脚本把手动升级过的版本按回默认值。
+const npmNames = [];
+if (biliVersion) {
+  npmNames.push('billion-context');
+  pkg.dependencies['billion-context'] = pkg.dependencies['billion-context'] || biliVersion;
+}
+
 pkg.dsh = pkg.dsh || {};
 pkg.dsh.profile = pkg.dsh.profile || {};
 const bundles = Array.isArray(pkg.dsh.profile.bundles) ? pkg.dsh.profile.bundles : [];
-for (const n of names) if (!bundles.includes(n)) bundles.push(n);
+for (const n of [...linkNames, ...npmNames]) if (!bundles.includes(n)) bundles.push(n);
 pkg.dsh.profile.bundles = bundles;
 pkg.dsh.profile.patchReload = pkg.dsh.profile.patchReload || 'live';
 fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
@@ -89,6 +107,9 @@ if [[ "$(id -un)" == "root" && -n "$OWNER" ]]; then
 fi
 [[ -d "$PROFILE_DIR/node_modules/qq-mode-console" ]] && ok "node_modules/qq-mode-console 已就位" || warn "node_modules/qq-mode-console 缺失"
 [[ -d "$PROFILE_DIR/node_modules/qq-agent-presets" ]] && ok "node_modules/qq-agent-presets 已就位" || warn "node_modules/qq-agent-presets 缺失"
+[[ -f "$PROFILE_DIR/node_modules/billion-context/dsh.bundle.patch.yml" ]] \
+  && ok "node_modules/billion-context 已就位（bundle patch 存在）" \
+  || warn "node_modules/billion-context 缺失（compress / decompress 等工具不会出现）"
 grep -q "qq-bridge MCP BEGIN" "$PROFILE_DIR/cordis.patch.yml" \
   && ok "cordis.patch.yml 已包含 MCP 区块" \
   || warn "cordis.patch.yml 缺少 MCP 区块（QQ 工具会全部不可用）"
@@ -99,3 +120,7 @@ printf '    systemctl restart qq-bridge     # 让桥接重新读一次 settings.
 printf '然后控制台切一次模式，应不再出现「未能同步到 DSH 设置」的告警。\n'
 printf '验证 QQ 工具真的挂上了：journalctl -u dsh-web -n 50 | grep snowluma-safe\n'
 printf '（看到「当前桥接模式 reserved2：…改用带令牌的 v2 读工具」即正常）\n'
+printf '验证 billion-context 真的挂上了：\n'
+printf '    sudo -u qqbridge env HOME=/opt/qq-bridge DSH_HOME=/opt/qq-bridge/.dsh \\\n'
+printf '      dsh --profile web --dump-config | grep -E "bili-native|bili-compaction-gate"\n'
+printf '（两行都在即正常；工具层则应出现 compress / decompress / acp_status）\n'

@@ -1911,6 +1911,8 @@ button:active:not(:disabled) {
         <label>会话 <select id="mdScope"></select></label>
         <button id="mdRefresh" class="small">刷新</button>
         <button id="mdExport" class="small">导出 JSON</button>
+        <button id="mdView" class="small" title="把当前窗口的日记渲染成 Markdown，可直接拷走">看 Markdown</button>
+        <button id="mdMd" class="small" title="下载当前窗口的 .md 文件（与磁盘上 diary/ 里的内容一致）">下载 .md</button>
         <button id="mdImportPick" class="small">导入 JSON</button>
         <input type="file" id="mdImportFile" accept=".json,application/json" hidden>
         <span class="meta" id="mdStats">—</span>
@@ -5527,8 +5529,46 @@ async function mdExport() {
   }
 }
 
-async function mdImport(file) {
+async function mdFetchMd() {
+  if (!mdState.role) throw new Error('先选一个人格');
+  const qs = new URLSearchParams({ role: mdState.role, kind: 'diary' });
+  if (mdState.scope) qs.set('scope', mdState.scope);
+  const r = await api('/api/memory-diary/md?' + qs.toString());
+  if (!r.ok) throw new Error(r.error || '读取失败');
+  return r;
+}
+
+async function mdViewMd() {
   try {
+    const r = await mdFetchMd();
+    const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const w = window.open('', '_blank');
+    if (!w) { alert(r.text); return; }
+    w.document.write(`<meta charset="utf-8"><title>${esc(mdState.role)} · ${esc(mdState.scope || '全部会话')}</title>` +
+      `<pre style="white-space:pre-wrap;font:14px/1.7 ui-monospace,monospace;padding:24px;max-width:860px;margin:0 auto">${esc(r.text)}</pre>`);
+    w.document.close();
+  } catch (e) {
+    showConsoleToast('读取 md 失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+async function mdDownloadMd() {
+  try {
+    const r = await mdFetchMd();
+    const blob = new Blob([r.text], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${mdState.role || 'role'}-${(mdState.scope || 'all').replace(/[^\w-]+/g, '-')}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showConsoleToast('已下载 md，跟服务器 diary/ 目录里的那份一致');
+  } catch (e) {
+    showConsoleToast('下载 md 失败：' + (e && e.message ? e.message : e));
+  }
+}
+
+async function mdImport(file) {  try {
     const text = await file.text();
     const bundle = JSON.parse(text);
     if (!bundle || typeof bundle.roles !== 'object' || !bundle.roles) throw new Error('不是本功能导出的文件（缺少 roles）');
@@ -5562,6 +5602,8 @@ document.addEventListener('click', async (event) => {
 
 document.getElementById('mdRefresh').addEventListener('click', loadMemoryDiary);
 document.getElementById('mdExport').addEventListener('click', mdExport);
+document.getElementById('mdView').addEventListener('click', mdViewMd);
+document.getElementById('mdMd').addEventListener('click', mdDownloadMd);
 document.getElementById('mdImportPick').addEventListener('click', () => document.getElementById('mdImportFile').click());
 document.getElementById('mdImportFile').addEventListener('change', (event) => {
   const file = event.target.files && event.target.files[0];

@@ -6,9 +6,10 @@
 // 被 per-name try/catch 静默吞掉 —— 现网完全不可观测（DSH 的 stderr 不落文件）。
 //
 // 本文件用桩 ctx 验证守卫现在的行为：
-//   1. restrict 抛错时**不静默**：写诊断文件、并 3 秒后对失败项重试一次；
-//   2. 时序问题（后注册的工具）能被重试补上；
-//   3. 执行期 guard 白名单照旧：mcp__* 放行、dev_* 拒绝。
+//   1. 「名字不存在」（DSH 的 unknown global tool）属于正常状态：默认不刷控制台、不写诊断；
+//   2. 真异常（名字存在但 restrict 仍失败）才出声：控制台一行短日志 + 诊断文件；
+//   3. 时序问题（后注册的工具）能被 3 秒后的重试补上；
+//   4. 执行期 guard 白名单照旧：mcp__* 放行、dev_* 拒绝。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -57,20 +58,38 @@ function makeCtx({ restrictImpl, knownAfter = Infinity }) {
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-tool-restrict-'));
 
-await test('restrict 全失败时不静默：写诊断文件 + 3 秒后重试', async () => {
-  const diag = path.join(tmpDir, 'diag-always-fail.log');
+await test('名字不存在（unknown global tool）是正常状态：不刷控制台、不写诊断', async () => {
+  const diag = path.join(tmpDir, 'diag-unknown.log');
   const mod = await loadPlugin(diag);
-  // 前 N 次（第一次 apply 的所有名字）都报「unknown global tool」，重试阶段也失败
-  const { ctx, calls } = makeCtx({ restrictImpl: () => new Error('tools.restrict() names unknown global tool "x"') });
-  mod.apply(ctx);
+  // 全部报「unknown global tool」= 这些名字本来就不在全局层（web composition 的常态）
+  const { ctx, calls } = makeCtx({
+    restrictImpl: () => new Error('tools.restrict() names unknown global tool "x"; known global tools: a, b')
+  });
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try { mod.apply(ctx); } finally { console.error = original; }
   assert.ok(calls.restrict.length > 0, '必须真的调用 restrict');
-  const first = fs.readFileSync(diag, 'utf8');
-  assert.match(first, /restrict ok=0 failed=\d+/, `诊断文件应记录失败计数：${first}`);
-  assert.match(first, /unknown global tool/, '诊断文件必须带 DSH 的原始报错');
-  // 等延迟重试落地
-  await new Promise((resolve) => setTimeout(resolve, 3400));
-  const after = fs.readFileSync(diag, 'utf8');
-  assert.match(after, /延迟重试 ok=0/, `重试结果也要落盘：${after}`);
+  assert.deepEqual(errors, [], '未注册的名字不该往控制台写任何东西');
+  assert.equal(fs.existsSync(diag), false, '未注册不该产生诊断文件（旧实现每次启动刷 60KB+）');
+});
+
+await test('restrict 真异常不静默：控制台一行短日志 + 诊断文件', async () => {
+  const diag = path.join(tmpDir, 'diag-broken.log');
+  const mod = await loadPlugin(diag);
+  const { ctx } = makeCtx({
+    restrictImpl: () => new Error('tools.restrict() requires a scoped context (agent.ctx)')
+  });
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args.join(' '));
+  try { mod.apply(ctx); } finally { console.error = original; }
+  assert.equal(errors.length, 1, `真异常应只打一行，实际 ${errors.length}`);
+  assert.match(errors[0], /restrict 异常 \d+\/\d+/);
+  assert.ok(errors[0].length < 400, '控制台行必须短，不得把整份 known 清单拼进来');
+  const log = fs.readFileSync(diag, 'utf8');
+  assert.match(log, /异常=\d+/);
+  assert.match(log, /requires a scoped context/);
 });
 
 await test('时序问题能被 3 秒后的重试补藏（工具晚注册）', async () => {

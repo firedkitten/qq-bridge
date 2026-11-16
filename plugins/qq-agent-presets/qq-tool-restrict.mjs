@@ -232,10 +232,13 @@ const SAFE_EXACT = new Set([
 // 而失败被下面的 per-name try/catch 吞掉了。DSH 的 stderr 不落日志文件（只有启动失败
 // 才会写 ~/.dsh/logs），所以「为什么失败」在现网完全不可观测。
 //
-// 这里把失败原因写到 <repo>/state/tool-restrict.log（有界、只写最近 20 行），
-// 并把失败的名字在 3 秒后重试一次：如果只是「注入器比 preset 晚注册」的时序问题，
-// 重试就能把工具真正藏掉；如果重试也失败，日志里会留下 DSH 的原始报错，
-// 下次排查不用再猜。
+// 2026-10-26 更正口径：DSH 对**不存在的名字**抛的是 `names unknown global tool`，
+// 那是 web composition 的常态（本地执行工具都是 per-agent scoped 工具），不算失败，
+// 因此现在只有「名字存在却 restrict 仍失败」才写日志/出声；未注册的名字只做时序重试。
+//
+// 这里把真异常写到 <repo>/state/tool-restrict.log（有界、只写最近 20 行），
+// 并把未注册的名字在 3 秒后重试一次：如果只是「注入器比 preset 晚注册」的时序问题，
+// 重试就能把工具真正藏掉；补藏结果也会落盘，下次排查不用再猜。
 const DIAG_FILE = (() => {
   // 测试可用 QQ_TOOL_RESTRICT_LOG 改到临时文件，避免污染真实 state/
   if (process.env.QQ_TOOL_RESTRICT_LOG) return path.resolve(process.env.QQ_TOOL_RESTRICT_LOG)
@@ -273,7 +276,19 @@ export function apply(ctx) {
   // 因此本名单主要防的是"别的 composition 把它们注册进全局层"这种回归，
   // 以及 MCP 之外的宿主工具（plugin-guard / cordis 检查工具等）。
   const stamp = new Date().toISOString()
-  const failed = []
+  // 口径（2026-10-26）：`tools.restrict()` 只认**全局层**工具名，名字不存在时抛
+  // `tools.restrict() names unknown global tool "x"; known global tools: …`。
+  // 本名单里绝大多数名字在 web composition 下根本不在全局层（本地执行工具是各 preset
+  // 自己注册的 scoped 工具，QQ preset 里压根没挂载）——那是**正常状态**，不是失败：
+  // 旧实现把它当失败，于是每次启动往控制台刷 60KB+ 的错误串（78 个名字 × 整份 known 清单 × 2 遍）。
+  // 现在只把「名字存在但 restrict 仍失败」当异常上报（例如 scope 不对），其余静默；
+  // 诊断仍写 state/tool-restrict.log，想复现旧口径设 QQ_TOOL_RESTRICT_VERBOSE=1。
+  const VERBOSE = process.env.QQ_TOOL_RESTRICT_VERBOSE === '1' || process.env.QQ_TOOL_RESTRICT_VERBOSE === 'true'
+  const isUnknownToolError = (message) => /unknown global tool/i.test(String(message ?? ''))
+
+  let hidden = 0
+  const unregistered = []
+  const broken = []
   const attempt = (names) => {
     let ok = 0
     for (const name of names) {
@@ -281,38 +296,57 @@ export function apply(ctx) {
         ctx.tools.restrict({ deny: [name] })
         ok += 1
       } catch (error) {
-        failed.push({ name, message: String(error?.message ?? error) })
+        const message = String(error?.message ?? error)
+        if (isUnknownToolError(message)) unregistered.push({ name, message })
+        else broken.push({ name, message })
       }
     }
+    hidden += ok
     return ok
   }
 
-  const firstOk = attempt(KNOWN_DANGEROUS_GLOBAL_TOOLS)
-  const firstFailed = failed.slice()
-  failed.length = 0
+  attempt(KNOWN_DANGEROUS_GLOBAL_TOOLS)
 
-  if (firstFailed.length > 0) {
-    // 逐个名字的报错收成一类，避免 18 行重复
-    const reasons = [...new Set(firstFailed.map((f) => f.message))]
+  if (broken.length > 0) {
+    // 真异常才出声，且只出一条短行（细节进诊断文件，不把 known 清单拼进控制台）
+    const reason = broken[0].message
     console.error(
-      `[qq-tool-restrict] restrict 失败 ${firstFailed.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length}：${reasons.join(' | ')}`
+      `[qq-tool-restrict] restrict 异常 ${broken.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length} 个（${broken[0].name}: ${reason.length > 160 ? `${reason.slice(0, 160)}…` : reason}）`
     )
     writeDiagnostics([
-      `${stamp} restrict ok=${firstOk} failed=${firstFailed.length} 原因: ${reasons.join(' | ')}`,
-      `${stamp} 失败样例: ${firstFailed.slice(0, 3).map((f) => f.name).join(', ')}`,
+      `${stamp} restrict 已藏=${hidden} 未注册=${unregistered.length} 异常=${broken.length} 原因: ${broken[0].message}`,
     ])
-    // 时序兜底：注入器的工具可能在 preset apply 之后才注册进全局层。
-    // 3 秒后重试失败项；成功则记一行，失败保留原因。
+  } else if (VERBOSE) {
+    writeDiagnostics([`${stamp} restrict 已藏=${hidden} 未注册=${unregistered.length} 异常=0`])
+  }
+
+  // 时序兜底：注入器/别的 bundle 的工具可能在 preset apply 之后才注册进全局层。
+  // 只对「当时还不存在」的名字重试一次；结果写诊断，控制台默认不刷。
+  if (unregistered.length > 0) {
     const timer = setTimeout(() => {
       let ok = 0
       const still = []
-      for (const { name } of firstFailed) {
-        try { ctx.tools.restrict({ deny: [name] }); ok += 1 } catch (error) { still.push(`${name}: ${error?.message ?? error}`) }
+      for (const { name } of unregistered) {
+        try {
+          ctx.tools.restrict({ deny: [name] })
+          ok += 1
+        } catch (error) {
+          const message = String(error?.message ?? error)
+          if (!isUnknownToolError(message)) still.push({ name, message })
+        }
       }
-      if (ok > 0) console.error(`[qq-tool-restrict] 延迟重试补藏成功 ${ok} 个`)
-      writeDiagnostics([
-        `${new Date().toISOString()} 延迟重试 ok=${ok} 仍失败=${still.length}${still.length ? ` 原因: ${still[0]}` : ''}`,
-      ])
+      if (ok > 0) {
+        writeDiagnostics([`${new Date().toISOString()} 延迟重试 ok=${ok} 仍失败=${still.length}`])
+        if (VERBOSE) console.error(`[qq-tool-restrict] 延迟重试补藏成功 ${ok} 个`)
+      } else if (still.length > 0) {
+        // 重试期才冒出的真异常：短行 + 诊断
+        console.error(
+          `[qq-tool-restrict] 延迟重试异常 ${still.length} 个（${still[0].name}: ${still[0].message.length > 160 ? `${still[0].message.slice(0, 160)}…` : still[0].message}）`
+        )
+        writeDiagnostics([`${new Date().toISOString()} 延迟重试 ok=0 仍失败=${still.length} 原因: ${still[0].message}`])
+      } else if (VERBOSE) {
+        writeDiagnostics([`${new Date().toISOString()} 延迟重试 ok=0 仍失败=${unregistered.length}（都还没注册）`])
+      }
     }, 3000)
     timer?.unref?.()
   }

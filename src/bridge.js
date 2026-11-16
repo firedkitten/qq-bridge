@@ -41,6 +41,8 @@ import {
 } from '../qqbridge-tool/memory-diary/src/facts.js';
 // 档案留存（append-only）：写入/删除/轮转都留底稿，只给控制台看，绝不参与注入。
 import { archiveStats, listArchive, readArchive } from '../qqbridge-tool/memory-diary/src/archive.js';
+// md 视图层：把 jsonl 渲染成给人看的 diary/<窗口>.md 与 archive/<窗口>/<日期>.md。只写不读，注入永不依赖它。
+import { archiveMdFile, diaryMdFile, renderArchiveMd, renderDiaryMd, writeArchiveViews, writeDiaryViews } from '../qqbridge-tool/memory-diary/src/md-view.js';
 import { fileURLToPath } from 'node:url';
 import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
@@ -3852,6 +3854,8 @@ async function main() {
               scheduleProactiveCheckV2(key);
             }
             log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
+            // 启动时 DSH 还没就绪，那时排的「自己的时间」可能没排上；进二代模式时补排一次。
+            scheduleSelfDiaryWake();
           }
           log(`控制台：模式已设置为 ${requestedMode}${next.closedAgentPreset ? `（closed-agent preset: ${next.closedAgentPreset}）` : ''}${dshSynced ? '' : ' [仅本地，DSH 未同步]'}`);
           sendJson({ ok: true, mode: requestedMode, closedAgentPreset: next.closedAgentPreset, dshSynced });
@@ -4554,6 +4558,31 @@ async function main() {
           sendJson({ ok: true, role, days, kind, date, entries, stats: archiveStats(MEMORY_DIARY_DIR, role) });
           return;
         }
+        // 按会话窗口导出一份 md 视图（控制台“看 md / 下载”用；也可直接去磁盘翻 diary/ 目录）。
+        if (req.method === 'GET' && url.pathname === '/api/memory-diary/md') {
+          const role = targetRole(url.searchParams.get('role'));
+          if (!role) { sendJson({ ok: false, error: '缺少 role' }, 400); return; }
+          const scope = String(url.searchParams.get('scope') ?? '').trim();
+          const date = String(url.searchParams.get('date') ?? '').trim();
+          const kind = url.searchParams.get('kind') === 'archive' ? 'archive' : 'diary';
+          let text = '';
+          let file = '';
+          if (kind === 'archive') {
+            const day = date || listArchive(MEMORY_DIARY_DIR, role)[0]?.date || '';
+            const entries = day
+              ? [...readArchive(MEMORY_DIARY_DIR, role, { kind: 'fact', date: day }), ...readArchive(MEMORY_DIARY_DIR, role, { kind: 'diary', date: day })]
+              : [];
+            const picked = scope ? entries.filter((e) => inScope(e, scope)) : entries;
+            text = renderArchiveMd({ role, scope, date: day, entries: picked });
+            file = archiveMdFile(MEMORY_DIARY_DIR, role, scope, day);
+          } else {
+            const entries = readDiary(MEMORY_DIARY_DIR, role).filter((e) => inScope(e, scope));
+            text = renderDiaryMd({ role, scope, entries });
+            file = diaryMdFile(MEMORY_DIARY_DIR, role, scope);
+          }
+          sendJson({ ok: true, role, scope, kind, file, text });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/memory-diary/delete') {
           const body = await readBody();
           const role = targetRole(body.role);
@@ -4563,6 +4592,7 @@ async function main() {
           const result = store === 'facts'
             ? removeFact(MEMORY_DIARY_DIR, role, { at: body.at, text: body.text, conv: scope })
             : removeDiary(MEMORY_DIARY_DIR, role, { at: body.at, text: body.text, conv: scope });
+          syncMemoryViews(role, { immediate: true });
           // 不用手动清缓存：读写都看文件 mtime+size，删/加一条后注入侧自然重读。
           sendJson({ ...result, role, store });
           return;
@@ -4578,6 +4608,7 @@ async function main() {
           const result = store === 'diary'
             ? appendDiary(MEMORY_DIARY_DIR, { role, text, kind: String(body.kind ?? 'event'), conv, imp: Number(body.imp) || 3, extra: { source: 'console' } })
             : appendFact(MEMORY_DIARY_DIR, { role, text, cat: String(body.cat ?? 'identity'), conv, source: 'console' });
+          syncMemoryViews(role, { immediate: true });
           // 不用手动清缓存：读写都看文件 mtime+size，删/加一条后注入侧自然重读。
           sendJson({ ...result, role, store });
           return;
@@ -4602,6 +4633,7 @@ async function main() {
               if (r.ok && !r.skipped) diary += 1;
             }
             summary[role] = { facts, diary };
+            syncMemoryViews(role, { immediate: true });
           }
           log(`控制台：导入角色记忆 ${JSON.stringify(summary)}`);
           sendJson({ ok: true, summary });
@@ -7296,6 +7328,23 @@ async function main() {
           sendJson({ ok: true, key, category, content, memory: formatMemoryV2(st) });
           return;
         }
+        // 角色自己写日记（kind=self）：内容不限，不限窗口，写不写随她。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/diary-write') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const text = String(body.text ?? '').trim();
+          if (!key || !text) { sendJson({ ok: false, error: 'key/text 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('diary')) { sendJson({ ok: false, error: '工具未启用：qq_diary_write' }, 403); return; }
+          try {
+            const record = writeSelfDiary(key, text, String(body.kind ?? 'self'));
+            sendJson({ ok: true, key, kind: record?.kind ?? 'self', at: record?.at ?? Date.now(), text: record?.text ?? text });
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
+          }
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-update') {
           const body = await readBody();
           const key = String(body.key ?? '').trim();
@@ -7848,6 +7897,15 @@ async function main() {
     });
     server.listen(port, '127.0.0.1', () => {
       log(`本地控制台已启动：http://127.0.0.1:${port}`);
+      // 启动时补一次 md 视图：机器上换了电脑、或手动删过 diary/ 目录，起来就自愈。
+      setTimeout(() => {
+        try {
+          const r = diaryRole();
+          if (r) syncMemoryViews(r, { immediate: true });
+        } catch (error) {
+          log(`[memory-diary] 启动重建 md 视图失败（已跳过）：${error?.message ?? error}`);
+        }
+      }, 3000);
     });
     // 端口被占用说明已有实例在跑：以 exit 2 退出，守护脚本会识别为"已有实例"而不是无限重启
     server.on('error', (error) => {
@@ -10293,6 +10351,36 @@ async function main() {
     return rs.role ? sanitizeRoleName(rs.role) : '';
   }
 
+  // md 视图重建：jsonl 一变，就把 diary/<窗口>.md 与 archive/<窗口>/<日期>.md 同步过去。
+  // 只写不读——注入链路永远读 jsonl，视图坏了删掉重建即可。1.5s 防抖，聚同一轮里的连续写入。
+  const viewSyncTimers = new Map();
+  function syncMemoryViews(role, options = {}) {
+    const r = String(role ?? '').trim();
+    if (!r) return;
+    const run = () => {
+      viewSyncTimers.delete(r);
+      try {
+        writeDiaryViews(MEMORY_DIARY_DIR, r, readDiary(MEMORY_DIARY_DIR, r));
+        const entries = [];
+        for (const d of listArchive(MEMORY_DIARY_DIR, r).slice(-60)) {
+          entries.push(...readArchive(MEMORY_DIARY_DIR, r, { kind: d.kind, date: d.date }));
+        }
+        writeArchiveViews(MEMORY_DIARY_DIR, r, entries);
+      } catch (error) {
+        log(`[memory-diary] md 视图重建失败（已跳过）：${error?.message ?? error}`);
+      }
+    };
+    if (options.immediate) {
+      run();
+      return;
+    }
+    const prev = viewSyncTimers.get(r);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(run, 1500);
+    if (typeof timer.unref === 'function') timer.unref();
+    viewSyncTimers.set(r, timer);
+  }
+
   // 记忆写入时顺手落一条日记：AI 本来就会调 qq_memory_append，这里不额外花一轮对话。
   function diaryMirrorMemory(key, category, text, extra) {
     if (!diaryEnabled()) return;
@@ -10309,9 +10397,85 @@ async function main() {
         extra: extraSafe,
       });
       diaryCache = { key: '', list: [] };
+      syncMemoryViews(role);
     } catch (err) {
       log(`日记写入失败，已跳过：${err?.message ?? err}`);
     }
+  }
+
+  // 角色自己写的日记（kind=self）：内容不限——今天想到的事、心情、想对谁说的话都行，
+  // 不想写就不写。它和「从聊天里抽事件」是两条路：那条记录发生过什么，这条给她自己的表达欲。
+  const SELF_DIARY_KINDS = new Set(['self', 'thought', 'event', 'topic', 'impression']);
+  function writeSelfDiary(key, text, kind = 'self') {
+    if (!diaryEnabled()) throw new Error('日记功能未启用');
+    const role = diaryRole();
+    if (!role) throw new Error('还没有设定角色，日记没有归属');
+    const body = String(text ?? '').replace(/\s+/g, ' ').trim();
+    const maxChars = Math.max(40, Math.min(2000, Number(cfg?.diary?.selfWrite?.maxChars) || 200));
+    const t = body.slice(0, maxChars);
+    if (!t) throw new Error('内容不能为空');
+    const k = SELF_DIARY_KINDS.has(String(kind)) ? String(kind) : 'self';
+    const record = appendDiary(MEMORY_DIARY_DIR, {
+      role,
+      conv: memoryScope(key) || '',
+      kind: k,
+      text: t,
+      imp: 2,
+      extra: { source: 'self' },
+    });
+    diaryCache = { key: '', list: [] };
+    syncMemoryViews(role, { immediate: true });
+    log(`[memory-diary] ${role} 自己写了一条日记（${k}，${t.length} 字）：${t.slice(0, 20)}`);
+    return record;
+  }
+
+  // 每天给角色一段「自己的时间」：没人说话的空档里，她想写就写一条日记。
+  // 只在她醒着、且没有对话在跑时投递；不想写就什么都不用做（二代文本不会自动发出去）。
+  let selfDiaryTimer = null;
+  function selfDiaryConfig() {
+    const s = cfg?.diary?.selfWrite ?? {};
+    const num = (v, fallback) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+    return {
+      enabled: s.enabled !== false,
+      hour: Math.min(23, Math.max(0, num(s.hour, 21))),
+      jitterMinutes: Math.min(720, Math.max(0, num(s.jitterMinutes, 180))),
+      quietMs: Math.max(0, num(s.quietMs, 30 * 60 * 1000)),
+    };
+  }
+  function scheduleSelfDiaryWake() {
+    const conf = selfDiaryConfig();
+    if (!conf.enabled) return;
+    // 不在这里判断模式：启动时 DSH 还没连上、currentMode 还是初始值。到点再判断。
+    if (socialV2.paused || cfg.socialV2?.enabled === false) return;
+    const now = new Date();
+    const target = new Date(now);
+    target.setHours(conf.hour, Math.floor(Math.random() * 60), 0, 0);
+    target.setMinutes(target.getMinutes() + Math.floor(Math.random() * (conf.jitterMinutes + 1)));
+    if (target <= now) target.setDate(target.getDate() + 1);
+    const delay = Math.min(target.getTime() - now.getTime(), 24 * 60 * 60 * 1000);
+    if (selfDiaryTimer) clearTimeout(selfDiaryTimer);
+    selfDiaryTimer = setTimeout(() => {
+      selfDiaryTimer = null;
+      const key = `private:${cfg.ownerQQ}`;
+      try {
+        const st = getSocialV2State(key);
+        const idle = Date.now() - (st.lastIncomingAt || 0);
+        if (idle >= conf.quietMs && !isConversationBusyV2(key, st)) {
+          if (currentMode === 'reserved2') {
+            void sendWakePromptV2(key, 'selfDiary').catch((error) => log(`[diary] 自记唤醒异常 ${key}: ${error?.message ?? error}`));
+          } else {
+            log(`[diary] 跳过这次的「自己的时间」（当前模式是 ${currentMode}，不在二代仿真模式）`);
+          }
+        } else {
+          log(`[diary] 跳过这次的「自己的时间」（${key} 刚有动静，安静 ${Math.round(idle / 60000)} 分钟）`);
+        }
+      } catch (error) {
+        log(`[diary] 自记唤醒失败：${error?.message ?? error}`);
+      }
+      scheduleSelfDiaryWake();
+    }, delay);
+    if (typeof selfDiaryTimer.unref === 'function') selfDiaryTimer.unref();
+    log(`[diary] 下次「自己的时间」约 ${Math.round(delay / 60000)} 分钟后`);
   }
 
   // 取「最近 N 条 + 和当前话题相关几条」，按预算拼成注入块。读不到就返回空串，绝不阻塞唤醒。
@@ -10413,7 +10577,10 @@ async function main() {
         const r = appendFact(MEMORY_DIARY_DIR, { role, text: c.text, cat: c.cat, conv: key || '', source: 'auto' });
         if (r.ok && !r.skipped) added += 1;
       }
-      if (added) factsCache = { key: '', list: [] };
+      if (added) {
+        factsCache = { key: '', list: [] };
+        syncMemoryViews(role);
+      }
     } catch (err) {
       log(`长期事实提炼失败：${err?.message ?? err}`);
     }
@@ -11457,6 +11624,9 @@ async function main() {
     }
     if (reason === 'poke') {
       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
+    }
+    if (reason === 'selfDiary') {
+      return `${base}【自己的时间】${key}\n原因：现在没人找你，这段时间是你自己的。\n想写点什么就调用 qq_diary_write——写什么都行：今天想到的事、心情、看到的、想对谁说的话，不一定是聊天里发生的事；不想写就不写，不要为了交差硬凑。\n写完，或者决定不写，直接结束本轮：你的文本不会发到 QQ，也不用设置唤醒条件。`;
     }
     return `${base}【唤醒】${key}\n原因：${reason}${triggeredLine}\n【行动前】先判断：群里在聊什么？热闹还是冷清？有没有人直接找你？对方说完了吗？你有没有真正想说的？\n如果群聊正热但没人叫你，可以插一句有趣的/相关的，插不上再看情况潜水；不要一上来就划走。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续的几句话中不同消息指代的是不同的消息或人时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条；其他情况不要引用，别让对方猜。\n你可以调用工具查看未读消息、人设、状态，自行决定是否发言；决定潜水前必须按上面的【沉睡前强制等待】先等够观察窗口。`;
   }
@@ -13139,6 +13309,8 @@ async function main() {
   startDshWatch();
   startSnowlumaWatch();
   startConsoleServer();
+  // 每天一次的「自己的时间」：没人说话时让她自己决定要不要写一条日记。
+  scheduleSelfDiaryWake();
 
   await pumpMux();
 }
